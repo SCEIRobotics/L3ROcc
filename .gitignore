@@ -12,5 +12,10 @@
 .vscode
 ckpts
 
+/checkpoints
+/data
+/logs
+/outputs
+
 resize_demo_imgs.py
 img_dir_to_video.py
