@@ -48,6 +48,7 @@
 
 
 ## 📣 Updates
+* **[September 3, 2025]** ⭐️ Training code is updated! See `training` branch for details.
 * **[July 29, 2025]** 📈 Evaluation code is released! See `evaluation` branch for details.
 * **[July 16, 2025]** 🚀 Hugging Face Demo and inference code are released!
 
