@@ -116,7 +116,7 @@ The model takes a tensor of images and outputs a dictionary containing the recon
   * **Output**: A `dict` with the following keys:
       * `points`: Global point cloud unprojected by `local points` and `camerae_poses` (`torch.Tensor`, $B \times N \times H \times W \times 3$).
       * `local_points`: Per-view local point maps (`torch.Tensor`,  $B \times N \times H \times W \times 3$).
-      * `conf`: Confidence scores for local points (values in `[0, 1]`, higher is better) (`torch.Tensor`,  $B \times N \times H \times W \times 1$).
+      * `conf`: Confidence scores for local points (values in `[0, 1]` after `torch.sigmoid()`, higher is better) (`torch.Tensor`,  $B \times N \times H \times W \times 1$).
       * `camera_poses`: Camera-to-world transformation matrices (`4x4` in OpenCV format) (`torch.Tensor`,  $B \times N \times 4 \times 4$).
 
 ### Example Code Snippet
