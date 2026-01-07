@@ -7,6 +7,9 @@
 *.render*
 *.ply
 *.png
+*.safetensors
+*.npy
+
 
 **/__pycache__/
 

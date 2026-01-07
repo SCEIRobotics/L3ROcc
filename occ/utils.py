@@ -1,0 +1,409 @@
+import torch
+import open3d as o3d
+import numpy as np
+
+import matplotlib.pyplot as plt
+from copy import deepcopy
+
+from pyquaternion import Quaternion
+from scipy.spatial.transform import Rotation
+from scipy.spatial.transform import Slerp
+from scipy.interpolate import CubicSpline
+ 
+def voxel2points(pred_occ, mask_camera=None, free_label=0):
+
+    x = np.linspace(0, pred_occ.shape[0] - 1, pred_occ.shape[0])
+    y = np.linspace(0, pred_occ.shape[1] - 1, pred_occ.shape[1])
+    z = np.linspace(0, pred_occ.shape[2] - 1, pred_occ.shape[2])
+    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+    vv = np.stack([X, Y, Z, pred_occ], axis=-1)
+    valid_mask = pred_occ != free_label
+    if mask_camera is not None:
+        valid_mask = np.logical_and(valid_mask, mask_camera)
+    fov_voxels = vv[valid_mask].astype(np.float32)
+
+    return fov_voxels
+
+
+def pcd_to_voxels(pcd, voxel_size, pcd_range):
+    # 要注意pcd的xyz和pcd_range的要对应
+    occ_voxels = pcd.copy()
+    occ_voxels[:, 0] = occ_voxels[:, 0] - pcd_range[0]
+    occ_voxels[:, 1] = occ_voxels[:, 1] - pcd_range[1]
+    occ_voxels[:, 2] = occ_voxels[:, 2] - pcd_range[2]
+    occ_voxels[:, :3] = occ_voxels[:, :3] / voxel_size - 0.5
+    return np.floor(occ_voxels).astype(np.int32)
+
+
+def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
+    pcd = occ_voxels.copy()
+    pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
+    pcd[:, 0] = pcd[:, 0] + pcd_range[0]
+    pcd[:, 1] = pcd[:, 1] + pcd_range[1]
+    pcd[:, 2] = pcd[:, 2] + pcd_range[2]
+    return pcd
+
+
+def homogenize_points(
+    points,
+):
+    """Convert batched points (xyz) to (xyz1)."""
+    if isinstance(points, torch.Tensor):
+        return torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+    elif isinstance(points, np.ndarray):
+        return np.concatenate([points, np.ones_like(points[..., :1])], axis=-1)
+    else:
+        raise TypeError(
+            f"points must be torch.Tensor or np.ndarray, but got {type(points)}"
+        )
+
+
+def plot_camera_poses(extrinsics_original, extrinsics_interp):
+    """可视化相机位置和姿态"""
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # 提取原始和插值后的相机位置
+    pos_original = extrinsics_original[:, :3, 3]
+    pos_interp = extrinsics_interp[:, :3, 3]
+
+    # 绘制位置
+    ax.scatter(
+        pos_original[:, 0],
+        pos_original[:, 1],
+        pos_original[:, 2],
+        c="red",
+        s=100,
+        label="original",
+        zorder=5,
+    )
+    ax.plot(
+        pos_interp[:, 0],
+        pos_interp[:, 1],
+        pos_interp[:, 2],
+        c="blue",
+        linewidth=2,
+        label="interpolated",
+        zorder=3,
+    )
+
+    # 绘制相机姿态（x轴方向）
+    for ext in extrinsics_original[::1]:  # 每隔1个绘制原始姿态
+        pos = ext[:3, 3]
+        x_axis = ext[:3, 0] * 0.2  # 缩放轴长
+        ax.quiver(
+            pos[0],
+            pos[1],
+            pos[2],
+            x_axis[0],
+            x_axis[1],
+            x_axis[2],
+            color="red",
+            arrow_length_ratio=0.1,
+        )
+
+    for ext in extrinsics_interp[::5]:  # 每隔5个绘制插值姿态
+        pos = ext[:3, 3]
+        x_axis = ext[:3, 0] * 0.2
+        ax.quiver(
+            pos[0],
+            pos[1],
+            pos[2],
+            x_axis[0],
+            x_axis[1],
+            x_axis[2],
+            color="blue",
+            arrow_length_ratio=0.1,
+            alpha=0.5,
+        )
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.legend()
+    plt.title("相机外参插值结果")
+    # plt.show()
+    # 保存为图像
+    plt.savefig("camera_poses.png", dpi=300, bbox_inches="tight")
+
+
+def interpolate_extrinsics(extrinsics, x_original, x_target):
+    """
+    对相机外参矩阵进行插值，同时保证一定的外推性，旋转分量不做额外外推计算，直接取最近的一个外参
+    参数：
+        extrinsics: 原始外参矩阵，shape=(N,4,4)
+        x_original: 原始外参对应的坐标/时间，shape=(N,)
+        x_target: 目标插值点的坐标/时间，shape=(M,)
+    返回：
+        extrinsics_interp: 插值后的外参矩阵，shape=(M,4,4)
+    """
+    N = len(extrinsics)
+    if N < 2:
+        raise ValueError("至少需要2个外参矩阵进行插值")
+
+    # 步骤1：为平移向量构建三次样条插值器（x/y/z轴分别构建）
+    # 构建3个轴的样条：trans_splines[0]→x轴，trans_splines[1]→y轴，trans_splines[2]→z轴
+    trans = np.array(extrinsics[:, :3, 3])  # (N,3)
+    trans_splines = [
+        CubicSpline(
+            x_original, trans[:, 0], bc_type="natural"
+        ),  # natural：自然样条，端点二阶导为0
+        CubicSpline(x_original, trans[:, 1], bc_type="natural"),
+        CubicSpline(x_original, trans[:, 2], bc_type="natural"),
+    ]
+    # 一次性计算所有目标点的平移插值（向量化，效率更高）
+    trans_interp = np.vstack(
+        [
+            trans_splines[0](x_target),
+            trans_splines[1](x_target),
+            trans_splines[2](x_target),
+        ]
+    ).T  # shape=(M,3)
+
+    # 步骤2：对每个目标点的旋转分量做插值
+    R_original = Rotation.from_matrix(extrinsics[:, :3, :3])
+    slerper = Slerp(x_original, R_original)
+    x_target_inner = x_target[x_target < x_original[-1]]  # 需要外推的单独处理
+    R_slerp = slerper(x_target_inner).as_matrix()
+    # 外推：repeat最后一个区间的旋转矩阵
+    R_slerp_ext = np.repeat(
+        R_slerp[-1][None, ...], len(x_target) - len(x_target_inner), axis=0
+    )
+    R_slerp = np.concatenate([R_slerp, R_slerp_ext], axis=0)
+    extrinsics_interp = np.zeros((len(x_target), 4, 4))
+    extrinsics_interp[:, -1, -1] = 1
+    extrinsics_interp[:, :3, :3] = R_slerp
+    extrinsics_interp[:, :3, 3] = trans_interp
+
+    return extrinsics_interp
+
+
+def convert_pointcloud_world_to_camera(points_world, T_cw):
+    """
+    将世界坐标系下的点云转换到相机坐标系
+    :param points_world: 世界坐标系点云，shape=(N, 3)
+    :param T_cw: 相机外参矩阵（相机→世界），shape=(4, 4)
+    :return: 相机坐标系点云，shape=(N, 3)
+    """
+    points_world = points_world.astype(np.float32)
+    # 步骤1：提取外参的旋转和平移
+    R_cw = T_cw[:3, :3]
+    t_cw = T_cw[:3, 3]
+
+    # 步骤2：计算世界→相机的旋转和平移
+    R_wc = R_cw.T  # 旋转矩阵的逆=转置
+    t_wc = -R_wc @ t_cw  # 等价于 -np.dot(R_wc, t_cw)
+
+    # 步骤3：对每个点进行变换
+    points_camera = (R_wc @ (points_world - t_cw).T).T
+
+    return points_camera
+
+
+def element_isin(tensor1, tensor2, invert=False):
+    """
+    tensor1: N x k
+    tensor2: M x k
+    return : N x 1, bool
+    """
+    eq_per_element = torch.eq(tensor1.unsqueeze(1), tensor2.unsqueeze(0))
+    eq_per_tensor = eq_per_element.all(2)
+    eq_per_tensor_isin = eq_per_tensor.any(1)
+    if invert:
+        eq_per_tensor_isin = ~eq_per_tensor_isin
+    return eq_per_tensor_isin
+
+
+def run_poisson(pcd, depth, n_threads, min_density=None):
+    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=depth, n_threads=8
+    )
+
+    # Post-process the mesh
+    if min_density:
+        vertices_to_remove = densities < np.quantile(densities, min_density)
+        mesh.remove_vertices_by_mask(vertices_to_remove)
+    mesh.compute_vertex_normals()
+
+    return mesh, densities
+
+
+def create_mesh_from_map(
+    buffer, depth, n_threads, min_density=None, point_cloud_original=None
+):
+
+    if point_cloud_original is None:
+        pcd = buffer_to_pointcloud(buffer)
+    else:
+        pcd = point_cloud_original
+
+    return run_poisson(pcd, depth, n_threads, min_density)
+
+
+def buffer_to_pointcloud(buffer, compute_normals=False):
+    pcd = o3d.geometry.PointCloud()
+    for cloud in buffer:
+        pcd += cloud
+    if compute_normals:
+        pcd.estimate_normals()
+
+    return pcd
+
+
+def preprocess_cloud(
+    pcd,
+    max_nn=20,
+    normals=True,
+):
+
+    cloud = deepcopy(pcd)
+    if normals:
+        params = o3d.geometry.KDTreeSearchParamKNN(max_nn)
+        cloud.estimate_normals(params)
+        cloud.orient_normals_towards_camera_location()
+
+    return cloud
+
+
+def preprocess(pcd, config, normals=False):
+    return preprocess_cloud(pcd, config["max_nn"], normals=normals)
+
+
+def nn_correspondance(verts1, verts2):  # unuse
+    """for each vertex in verts2 find the nearest vertex in verts1
+
+    Args:
+        nx3 np.array's
+    Returns:
+        ([indices], [distances])
+
+    """
+
+    indices = []
+    distances = []
+    if len(verts1) == 0 or len(verts2) == 0:
+        return indices, distances
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(verts1)
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+    for vert in verts2:
+        _, inds, dist = kdtree.search_knn_vector_3d(vert, 1)
+        indices.append(inds[0])
+        distances.append(np.sqrt(dist[0]))
+
+    return indices, distances
+
+
+def point_transform_3d_batch(loc, M, use_torch=False):
+    """
+    Transform a 3D point using a 4x4 matrix
+    loc: Nx3 array point location
+    out: Nx3 array transformed point location
+    """
+    hwc_input = len(loc.shape) == 3
+    if hwc_input:  # h, w, c input
+        h, w = loc.shape[0], loc.shape[1]
+        loc = loc.reshape(-1, 3)
+
+    if use_torch:
+        ones = torch.ones((loc.shape[0], 1), device=loc.device)
+        point = torch.concat((loc, ones), axis=1)
+        point = point.unsqueeze(2)
+        M = M.unsqueeze(0)
+    else:
+        point = np.concatenate((loc, np.ones((loc.shape[0], 1))), axis=1)
+        point = point[:, :, np.newaxis]
+        M = M[np.newaxis, :, :]
+
+    point_transformed = M @ point
+    point_transformed = point_transformed[:, :, 0]
+
+    # normalize, 其实最后一位就是1.0
+    point_transformed[:, 0] /= point_transformed[:, 3]
+    point_transformed[:, 1] /= point_transformed[:, 3]
+    point_transformed[:, 2] /= point_transformed[:, 3]
+    point_transformed = point_transformed[:, :3]
+    if hwc_input:
+        point_transformed = point_transformed.reshape(h, w, 3)
+    return point_transformed
+
+
+def point_transform_2d_batch(loc, M, use_torch=False):
+    """
+    Transform a 2D point using a 3x3 matrix
+    loc: Nx2 array point location
+    out: Nx2 array transformed point location
+    """
+    hwc_input = len(loc.shape) == 3
+    if hwc_input:  # h, w, c input
+        h, w = loc.shape[0], loc.shape[1]
+        loc = loc.reshape(-1, 2)
+
+    if use_torch:
+        ones = torch.ones((loc.shape[0], 1), device=loc.device)
+        point = torch.concat((loc, ones), axis=1)
+        point = point.unsqueeze(2)
+        M = M.unsqueeze(0)
+    else:
+        point = np.concatenate((loc, np.ones((loc.shape[0], 1))), axis=1)
+        point = point[:, :, np.newaxis]
+        M = M[np.newaxis, :, :]
+
+    point_transformed = M @ point
+    point_transformed = point_transformed[:, :, 0]
+
+    # normalize, 其实最后一位就是1.0
+    point_transformed[:, 0] /= point_transformed[:, 2]
+    point_transformed[:, 1] /= point_transformed[:, 2]
+    point_transformed = point_transformed[:, :2]
+    if hwc_input:
+        point_transformed = point_transformed.reshape(h, w, 2)
+
+    return point_transformed
+
+
+def quaternion_to_matrix(quat, to_wxyz=False):
+    if to_wxyz:
+        quat = np.roll(quat, -1)
+    r = Rotation.from_quat(quat)  # 顺序为 (x, y, z, w)
+    rot = r.as_matrix()
+    return rot
+
+
+def matrix_to_quaternion(matrix, to_wxyz=False):
+    r = Rotation.from_matrix(matrix)
+    quat = r.as_quat()
+    if to_wxyz:
+        quat = np.roll(quat, 1)
+    return quat
+
+
+def ray_casting(voxels, origin, direction, max_distance):
+    """
+    检查光线投射过程中是否有体素遮挡。
+
+    :param voxels: 3D numpy array，表示体素网格（True表示存在体素）。
+    :param origin: 光线的起点坐标（x, y, z）。
+    :param direction: 光线的方向向量（已归一化）。
+    :param max_distance: 最大检查距离。
+    :return: 第一个被击中的体素位置或None如果没有体素被击中。
+    """
+    position = np.array(origin, dtype=float)
+    step_size = 0.1  # 步长，可以调整以提高精度或性能
+
+    for _ in range(int(max_distance / step_size)):
+        position += direction * step_size
+        voxel_coords = np.floor(position).astype(int)
+
+        # 检查坐标是否在网格范围内
+        if (
+            0 <= voxel_coords[0] < voxels.shape[0]
+            and 0 <= voxel_coords[1] < voxels.shape[1]
+            and 0 <= voxel_coords[2] < voxels.shape[2]
+        ):
+
+            if voxels[tuple(voxel_coords)]:
+                return tuple(voxel_coords)
+
+    return None
