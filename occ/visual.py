@@ -7,6 +7,7 @@ import numpy as np
 
 import mayavi.mlab as mlab 
 from globals import get_global
+#这个代码用于可视化.npy文件！关于可视化的都要在本地安装python=3.8，再跑!我用这个代码是用于获取第一帧最想要的参数视角
 
 LABEL_COLORS = get_global('LABEL_COLORS') * 255
 alpha = np.ones((LABEL_COLORS.shape[0], 1)) * 255
@@ -34,8 +35,8 @@ if __name__=="__main__":
     mlab.options.offscreen = offscreen
     from argparse import ArgumentParser
     parse = ArgumentParser() 
-    parse.add_argument('--visual_path', type=str, default="/mnt/data_ssd/yenianjin/project/Pi3/vis/output_occ.npy")  
-    parse.add_argument('--visual_save_dir', type=str, default="/mnt/data_ssd/yenianjin/project/Pi3/vis")
+    parse.add_argument('--visual_path', type=str, default="/mnt/data/huangbinling/project/occgen/outputs/occ_pcd_visual_cam0.npy")  
+    parse.add_argument('--visual_save_dir', type=str, default="/mnt/data/huangbinling/project/occgen/outputs/visual")
     args = parse.parse_args()
     visual_path = args.visual_path
     visual_save_dir = args.visual_save_dir

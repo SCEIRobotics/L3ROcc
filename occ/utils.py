@@ -10,24 +10,30 @@ from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Slerp
 from scipy.interpolate import CubicSpline
  
-def voxel2points(pred_occ, mask_camera=None, free_label=0):
-
-    x = np.linspace(0, pred_occ.shape[0] - 1, pred_occ.shape[0])
-    y = np.linspace(0, pred_occ.shape[1] - 1, pred_occ.shape[1])
-    z = np.linspace(0, pred_occ.shape[2] - 1, pred_occ.shape[2])
-    X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
-    vv = np.stack([X, Y, Z, pred_occ], axis=-1)
-    valid_mask = pred_occ != free_label
+def voxel2points(pred_occ, mask_camera=None, free_label=0): 
+    
+    d, h, w = pred_occ.shape  
+    x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=pred_occ.dtype)
+    y = torch.linspace(0, h - 1, h, device=pred_occ.device, dtype=pred_occ.dtype)
+    z = torch.linspace(0, w - 1, w, device=pred_occ.device, dtype=pred_occ.dtype)
+    X, Y, Z = torch.meshgrid(x, y, z) 
+    vv = torch.stack([X, Y, Z, pred_occ], dim=-1)
+ 
+    valid_mask = pred_occ != free_label 
     if mask_camera is not None:
-        valid_mask = np.logical_and(valid_mask, mask_camera)
-    fov_voxels = vv[valid_mask].astype(np.float32)
-
+        mask_camera = mask_camera.to(device=pred_occ.device, dtype=torch.bool)
+        valid_mask = torch.logical_and(valid_mask, mask_camera)
+ 
+    fov_voxels = vv[valid_mask]
+ 
+    fov_voxels = fov_voxels.to(dtype=torch.float32)
+ 
     return fov_voxels
 
 
 def pcd_to_voxels(pcd, voxel_size, pcd_range):
     # 要注意pcd的xyz和pcd_range的要对应
-    occ_voxels = pcd.copy()
+    occ_voxels = pcd.clone() if isinstance(pcd, torch.Tensor) else pcd.copy()
     occ_voxels[:, 0] = occ_voxels[:, 0] - pcd_range[0]
     occ_voxels[:, 1] = occ_voxels[:, 1] - pcd_range[1]
     occ_voxels[:, 2] = occ_voxels[:, 2] - pcd_range[2]
@@ -36,7 +42,7 @@ def pcd_to_voxels(pcd, voxel_size, pcd_range):
 
 
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
-    pcd = occ_voxels.copy()
+    pcd = occ_voxels.clone() if isinstance(occ_voxels, torch.Tensor) else occ_voxels.copy()
     pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
     pcd[:, 0] = pcd[:, 0] + pcd_range[0]
     pcd[:, 1] = pcd[:, 1] + pcd_range[1]
@@ -163,7 +169,7 @@ def interpolate_extrinsics(extrinsics, x_original, x_target):
     # 步骤2：对每个目标点的旋转分量做插值
     R_original = Rotation.from_matrix(extrinsics[:, :3, :3])
     slerper = Slerp(x_original, R_original)
-    x_target_inner = x_target[x_target < x_original[-1]]  # 需要外推的单独处理
+    x_target_inner = x_target[x_target < x_original[-1]]  # 需要外推的单独处理，就是采样后的帧可能没有包含原有的最后一些帧，就对最后一些帧进行外推
     R_slerp = slerper(x_target_inner).as_matrix()
     # 外推：repeat最后一个区间的旋转矩阵
     R_slerp_ext = np.repeat(
@@ -407,3 +413,20 @@ def ray_casting(voxels, origin, direction, max_distance):
                 return tuple(voxel_coords)
 
     return None
+
+
+def convert_pointcloud_camera_to_world(points_camera, T_cw):
+        """
+        将相机坐标系下的点云转换回世界坐标系
+        :param points_camera: 相机坐标系点云 (N, 3)
+        :param T_cw: 相机外参 (4, 4)，即 self.camera_pose[i]
+        :return: 世界坐标系点云 (N, 3)
+        """
+        # T_cw 通常是 Camera-to-World 的变换矩阵 (Pose)
+        # P_world = R * P_cam + t
+        R = T_cw[:3, :3]
+        t = T_cw[:3, 3]
+        
+        # 矩阵乘法：(R @ P_cam.T).T + t
+        points_world = (R @ points_camera.T).T + t
+        return points_world
