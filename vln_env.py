@@ -6,6 +6,7 @@ import time
 import glob
 import numpy as np
 import open3d as o3d
+from collections import deque
 
 # from pi3.utils.geometry import homogenize_points
 from pi3.utils.geometry import depth_edge
@@ -259,10 +260,13 @@ class DataGenerator:
         self.ray_cast_step_size = self.config["ray_cast_step_size"]
         self.interval = self.config["interval"]
         self.voxel_size_scale = self.config["voxel_size_scale"]
+        self.history_len = self.config["history_len"]
+        self.history_step = self.config["history_step"]
+        self.occ_history_buffer = deque(maxlen=self.history_len) # 创建一个定长队列，自动挤出旧数据
 
         self.project_dir = os.path.dirname(os.path.abspath(__file__))
         self.save_dir = os.path.join(self.project_dir, "outputs")
-        self.save_path = os.path.join(self.save_dir, "office_1")
+        self.save_path = os.path.join(self.save_dir, "office_3")
 
     def pcd_reconstuction(self, input_path, pcd_save=False):
         imgs, traj_len = load_images_as_tensor(
@@ -693,6 +697,53 @@ class DataGenerator:
 
         return points_world.astype(np.float32)
 
+    def get_temporal_occ(self, new_occ_world, current_pose_matrix, save_to_history=False):
+        """
+        滑动窗口累积 OCC，并转换到当前相机坐标系
+        
+        Args:
+            new_occ_world: 当前帧新检测到的 OCC (N, 3), 世界坐标系
+            current_pose_matrix: 当前相机的位姿 (4, 4), 世界坐标系
+            save_to_history: 是否将当前帧数据加入滑动队列
+            
+        Returns:
+            merged_occ_cam: 累积并转换后的 OCC (M, 3), 当前相机坐标系
+            merged_occ_world: 累积后的 OCC (M, 3), 世界坐标系 (用于存 NPY)
+        """
+        #将当前帧的数据加入滑动队列
+        if save_to_history and len(new_occ_world)>0:
+            self.occ_history_buffer.append(new_occ_world)
+
+        # 首先取出所有历史点
+        candidates = list(self.occ_history_buffer)
+
+        # 如果当前帧没有被存入历史（save_to_history=False），
+        # 我们依然需要在画面中看到它，所以要手动把它加到临时的融合列表中。
+        if not save_to_history and len(new_occ_world) > 0:
+            candidates.append(new_occ_world)
+
+        if len(candidates) == 0:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
+
+        #合并缓冲区内的所有点 此时所有点都在世界坐标系下 直接合并不需要坐标变换
+        merged_occ_world = np.concatenate(candidates, axis=0)
+
+        #体素下采样 
+        # 因为多帧累积会有大量重叠点，必须降采样去重，否则点数会爆炸
+        if len(merged_occ_world) > 0:
+            pcd_tmp = o3d.geometry.PointCloud()
+            pcd_tmp.points = o3d.utility.Vector3dVector(merged_occ_world)
+            pcd_tmp = pcd_tmp.voxel_down_sample(voxel_size=self.voxel_size) 
+            merged_occ_world = np.asarray(pcd_tmp.points, dtype=np.float32)
+        
+        if len(merged_occ_world) == 0:
+             return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.float32)
+        
+        # 转换到当前相机坐标系
+        merged_occ_cam = self.convert_pointcloud_world_to_camera(merged_occ_world, current_pose_matrix)
+        
+        return merged_occ_cam, merged_occ_world
+        
     def occ_gen_all_pipeline(self, input_path, pcd_save=False):
         self.camera_intric = np.array(
             [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
@@ -753,28 +804,36 @@ class DataGenerator:
                 occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
             )  # 最后一维是颜色 是没有进行mask的，所有点都在相机视野内，一个全局地图
 
+            #每次跑新视频前，清空历史缓冲区
+            self.occ_history_buffer.clear()
             for i in range(total_frames):
                 current_pose = self.camera_pose[i]
 
                 # ================= A. 计算数据 =================
 
-                # 1. 计算当前帧可见 Occ (核心数据)
+                #  计算当前帧可见 Occ (核心数据)
                 occ_indices, _ = self.check_visual_occ(self.occ_pcd, current_pose)
-                local_occ_cam = voxels_to_pcd(
+                single_frame_occ_cam = voxels_to_pcd(
                     occ_indices, self.voxel_size, self.pc_range
                 )
-                if isinstance(local_occ_cam, torch.Tensor):
-                    local_occ_cam = local_occ_cam.detach().cpu().numpy()
-                if local_occ_cam.shape[1] == 4:
-                    local_occ_cam = local_occ_cam[:, :3]
+                if isinstance(single_frame_occ_cam, torch.Tensor):
+                    single_frame_occ_cam = single_frame_occ_cam.detach().cpu().numpy()
+                if single_frame_occ_cam.shape[1] == 4:
+                    single_frame_occ_cam = single_frame_occ_cam[:, :3]
 
-                # 2. 计算当前帧相机坐标系下的可见Occ转换到世界坐标系下
+                # 计算当前帧相机坐标系下的可见Occ转换到世界坐标系下
                 # 公式: P_world = R * P_cam + t
-                local_occ_world = self.convert_pointcloud_camera_to_world(
-                    local_occ_cam, current_pose
+                single_frame_occ_world = self.convert_pointcloud_camera_to_world(
+                    single_frame_occ_cam, current_pose
                 )
-
-                # 3. 计算背景和轨迹 但这个是在相机坐标系下的，我们不用它
+                
+                # 获取滑动窗口累计后的结果
+                save_flag = (i % self.history_step == 0)
+                local_occ_cam, local_occ_world = self.get_temporal_occ(
+                    single_frame_occ_world, current_pose, save_to_history=save_flag
+                ) #现在的local_occ_cam和local_occ_world都是通过历史帧累计后的结果，前者是当前帧相机坐标系下，后者是世界坐标系下
+                
+                #  计算背景和轨迹 但这个是在相机坐标系下的，用的是occ点云，而不是所有的初始点云 我们现在不用它
                 bg_cam = self.convert_pointcloud_world_to_camera(
                     self.occ_pcd, current_pose
                 )
@@ -788,17 +847,17 @@ class DataGenerator:
                 if traj_cam.shape[1] == 4:
                     traj_cam = traj_cam[:, :3]
 
-                # 我们还是使用世界坐标系下的背景和轨迹
-                bg_world = self.pcd
+                # 我们还是使用世界坐标系下的背景和轨迹！！！注意：这里的背景是初始的点云稠密背景，轨迹是到历史所有到当前帧的轨迹
+                bg_world = self.pcd # 使用的是初始的点云稠密背景
                 traj_current_world = self.camera_pose[0 : i + 1, :3, 3]
                 if bg_world.shape[1] == 4:
                     bg_world = bg_world[:, :3]
                 if traj_current_world.shape[1] == 4:
                     traj_current_world = traj_current_world[:, :3]
 
-                # ================= B. 单独保存 Occ =================
+                # ================= B. 单独保存 通过历史帧累计后的Occ =================
 
-                # 1. 保存单独的 Occ PLY
+                # 保存单独的 Occ PLY
                 if len(local_occ_cam) > 0:
                     # 纯绿色用于 PLY 显示
                     pure_occ_color = np.zeros_like(local_occ_cam)
@@ -813,10 +872,9 @@ class DataGenerator:
                     # write_ply 需要至少一个点，这里简单处理，若空则跳过或存dummy
                     pass
 
-                # 2. 保存单独的 Occ NPY
+                # 保存单独的 Occ NPY
                 if len(local_occ_cam) > 0:
                     # 格式: [X, Y, Z, Label=2]
-                    # 加上 Label=2 是为了保持格式统一，方便后续脚本识别这是"Occ"
                     occ_npy_single = np.concatenate(
                         [local_occ_cam, np.full((local_occ_cam.shape[0], 1), 2)], axis=1
                     )
@@ -831,7 +889,7 @@ class DataGenerator:
                         np.zeros((0, 4), dtype=np.float32),
                     )
 
-                # ================= C. 保存相机坐标系下的混合数据  =================
+                # ================= C. 保存相机坐标系下的混合数据 但我目前没用到相机坐标系下的数据 =================
 
                 # 拼装颜色
                 bg_color = np.ones_like(bg_cam) * 0.7
@@ -843,10 +901,10 @@ class DataGenerator:
                     occ_color[:, 1] = 1.0
 
                 # 拼装列表
-                points_list = [bg_cam, traj_cam]
+                points_list = [bg_cam, traj_cam] #相机坐标系下的occ背景和轨迹
                 colors_list = [bg_color, traj_color]
                 if len(local_occ_cam) > 0:
-                    points_list.append(local_occ_cam)
+                    points_list.append(local_occ_cam) #相机坐标系下的累计版本的可见occ
                     colors_list.append(occ_color)
 
                 final_points = np.concatenate(points_list, axis=0)
@@ -882,7 +940,7 @@ class DataGenerator:
 
                 # ================= D. 保存世界坐标系下的混合数据 (支持真彩色) =================
 
-                bg_world_dense = self.pcd  # (N, 3)
+                bg_world_dense = bg_world # (N, 3)
 
                 # 获取背景颜色
                 if hasattr(self, "pcd_color"):
@@ -895,14 +953,13 @@ class DataGenerator:
                 bg_world_dense = bg_world_dense[:min_len]
                 bg_color_dense = bg_color_dense[:min_len]
 
-                # A. 构造背景 NPY: [x, y, z, r, g, b, 0]
+                # 构造背景 NPY: [x, y, z, r, g, b, 0]
                 bg_label = np.zeros((min_len, 1))  # Label 0
                 bg_npy = np.concatenate(
                     [bg_world_dense, bg_color_dense, bg_label], axis=1
                 )
 
-                # B. 构造轨迹 NPY: [x, y, z, 0, 0, 1, 1] (蓝色占位，视频脚本会重绘，但格式要对)
-                # 这里填什么颜色不重要，因为视频脚本会统一画轨迹球，但为了格式统一，填蓝色
+                #  构造轨迹 NPY: [x, y, z, 0, 0, 1, 1] (蓝色占位，视频脚本会重绘，但格式要对)
                 traj_len = len(traj_current_world)
                 if traj_len > 0:
                     traj_rgb = np.tile([0.0, 0.0, 1.0], (traj_len, 1))  # 全蓝
@@ -913,8 +970,8 @@ class DataGenerator:
                 else:
                     traj_npy = np.zeros((0, 7))
 
-                # C. 构造 OCC NPY: [x, y, z, 0.5, 0.5, 0.5, 2] (灰色占位)
-                occ_len = len(local_occ_world)
+                #  构造 OCC NPY: [x, y, z, 0.5, 0.5, 0.5, 2] (灰色占位)
+                occ_len = len(local_occ_world) # 累计版本的世界坐标系下的可见occ
                 if occ_len > 0:
                     occ_rgb = np.tile([0.5, 0.5, 0.5], (occ_len, 1))  # 全灰
                     occ_label = np.full((occ_len, 1), 2)  # Label 2

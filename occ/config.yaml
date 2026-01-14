@@ -10,3 +10,5 @@
 'ray_cast_step_size': 1.0
 'interval': 10
 'voxel_size_scale': 100.0
+'history_len': 10
+'history_step': 2
