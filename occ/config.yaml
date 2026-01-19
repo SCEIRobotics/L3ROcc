@@ -12,3 +12,4 @@
 'voxel_size_scale': 100.0
 'history_len': 10
 'history_step': 2
+'fps': 30.0
