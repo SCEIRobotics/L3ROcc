@@ -9,7 +9,260 @@ from pyquaternion import Quaternion
 from scipy.spatial.transform import Rotation
 from scipy.spatial.transform import Slerp
 from scipy.interpolate import CubicSpline
+
+
+
+def compute_rigid_transform(source_points, target_points):
+    """
+    计算源点集到目标点集的刚体变换（旋转矩阵R和平移向量t）
+
+    参数:
+        source_points: 源点集，形状为(n, 3)的numpy数组，n为点的数量
+        target_points: 目标点集，形状为(n, 3)的numpy数组，与源点集一一对应
+
+    返回:
+        R: 3x3旋转矩阵
+        t: 3x1平移向量
+        rmse: 均方根误差，评估变换精度
+    """
+    # 检查输入点集是否有效
+    if source_points.shape != target_points.shape:
+        raise ValueError("源点集和目标点集必须具有相同的形状")
+    if len(source_points) < 3:
+        raise ValueError("至少需要3个点来计算变换")
+
+    # 步骤1: 计算质心
+    centroid_source = np.mean(source_points, axis=0)
+    centroid_target = np.mean(target_points, axis=0)
+
+    # 步骤2: 中心化点集（移除质心）
+    source_centered = source_points - centroid_source
+    target_centered = target_points - centroid_target
+
+    # 步骤3: 构造协方差矩阵H
+    H = np.dot(source_centered.T, target_centered)
+
+    # 步骤4: 对H进行奇异值分解(SVD)
+    U, S, Vt = np.linalg.svd(H)
+    V = Vt.T
+
+    # 步骤5: 计算旋转矩阵并处理镜像情况
+    R = np.dot(V, U.T)
+
+    # 确保旋转矩阵行列式为1（右手坐标系）
+    if np.linalg.det(R) < 0:
+        V[:, 2] *= -1  # 修正V矩阵
+        R = np.dot(V, U.T)
+
+    # 步骤6: 计算平移向量
+    t = centroid_target - np.dot(R, centroid_source)
+
+    # 计算均方根误差(RMSE)评估精度
+    transformed_source = np.dot(source_points, R.T) + t
+    errors = np.linalg.norm(transformed_source - target_points, axis=1)
+    rmse = np.sqrt(np.mean(errors**2))
+
+    raw_errors = np.linalg.norm(source_points - target_points, axis=1)
+    raw_rmse = np.sqrt(np.mean(raw_errors**2))
+
+    return R, t, rmse, raw_rmse
+
+
+def compute_similarity_transform(source_points, target_points, get_rmse=True):
+    """
+    计算源点集到目标点集的相似变换（尺度s + 旋转R + 平移t）
+
+    参数:
+        source_points: 源点集，形状为(n, 3)的numpy数组
+        target_points: 目标点集，形状为(n, 3)的numpy数组，与源点集一一对应
+
+    返回:
+        s: 尺度因子
+        R: 3x3旋转矩阵
+        t: 3x1平移向量
+        rmse: 均方根误差
+    """
+    # 检查输入有效性
+    if source_points.shape != target_points.shape:
+        raise ValueError("源点集和目标点集必须形状相同")
+    if len(source_points) < 3:
+        raise ValueError("至少需要3个非共线点")
+
+    # 步骤1: 计算质心
+    centroid_source = np.mean(source_points, axis=0)
+    centroid_target = np.mean(target_points, axis=0)
+
+    # 步骤2: 中心化点集
+    source_centered = source_points - centroid_source  # 形状(n, 3)
+    target_centered = target_points - centroid_target  # 形状(n, 3)
+
+    # 步骤3: 计算尺度因子s
+    # 分子：目标点中心化后的模长平方和
+    sum_q_sq = np.sum(np.linalg.norm(target_centered, axis=1) ** 2)
+    # 分母：源点中心化后的模长平方和
+    sum_p_sq = np.sum(np.linalg.norm(source_centered, axis=1) ** 2)
+    if sum_p_sq == 0:
+        raise ValueError("源点集不能是单点（无法计算尺度）")
+    s = np.sqrt(sum_q_sq / sum_p_sq)  # 尺度因子（开平方确保s>0）
+
+    # 步骤4: 归一化目标点的尺度（消除尺度影响）
+    target_scaled = target_centered / s  # 形状(n, 3)
+
+    # 步骤5: 用SVD计算旋转矩阵R（同刚体变换）
+    H = np.dot(source_centered.T, target_scaled)  # 协方差矩阵(3,3)
+    U, S, Vt = np.linalg.svd(H)
+    V = Vt.T
+    R = np.dot(V, U.T)
+
+    # 修正镜像情况（确保行列式为1）
+    if np.linalg.det(R) < 0:
+        V[:, 2] *= -1
+        R = np.dot(V, U.T)
+
+    # 步骤6: 计算平移向量t（包含尺度）
+    t = centroid_target - s * np.dot(R, centroid_source)
+
+    # 计算RMSE评估精度
+    if get_rmse:
+        transformed_source = s * np.dot(source_points, R.T) + t
+        errors = np.linalg.norm(transformed_source - target_points, axis=1)
+        rmse = np.sqrt(np.mean(errors**2))
+
+        raw_errors = np.linalg.norm(source_points - target_points, axis=1)
+        raw_rmse = np.sqrt(np.mean(raw_errors**2))
+    else:
+        rmse = None
+        raw_rmse = None
+
+    return s, R, t, rmse, raw_rmse
+
+
+def ransac_pcd_registration(
+    src_pts, dst_pts, threshold=0.25, max_iterations=2000, min_inliers=8
+):
+    """
+    一个独立的 RANSAC 实现，用于点云配准，寻找最佳的旋转矩阵 R 和平移向量 t, 尺度变换 s。
+
+    参数:
+    src_pts (np.ndarray): 源点云的点集，形状为 (N, 3)。
+    dst_pts (np.ndarray): 目标点云的点集，形状为 (N, 3)。
+    threshold (float): 重投影误差的阈值，用于判断内点。
+    max_iterations (int): RANSAC 的最大迭代次数。
+
+    返回:
+    best_R (np.ndarray): 找到的最佳旋转矩阵 (3x3)。
+    best_t (np.ndarray): 找到的最佳平移向量 (3,)。
+    best_s (float): 找到的最佳尺度变换因子。
+    best_mask (np.ndarray): 一个布尔数组，标记哪些点是内点。
+    """
+
+    def warp_3d(pts, R, t, s):
+        """
+        对 3D 点云进行变换：R 旋转，t 平移，s 缩放。
+        """
+        return s * np.dot(pts, R.T) + t
+
+    if src_pts.shape != dst_pts.shape or src_pts.shape[0] < min_inliers:
+        raise ValueError(f"输入点集必须具有相同的形状, 且至少包含{min_inliers}个点。")
+
+    num_points = src_pts.shape[0]
+    best_inliers_count = 0
+    best_R = None
+    best_t = None
+    best_s = None
+    best_mask = np.zeros(num_points, dtype=bool)
+
+    for _ in range(max_iterations):
+        # 1. 随机采样：从所有点中选择4个非共线的点
+        # 为了简化，我们先随机选4个，如果它们共线则跳过本次迭代
+        sample_indices = random.sample(range(num_points), min_inliers)
+        src_sample = src_pts[sample_indices]
+        dst_sample = dst_pts[sample_indices]
+        # 计算 R, t, s
+        s, R, t, _, _ = compute_similarity_transform(
+            src_sample, dst_sample, get_rmse=False
+        )
+
+        # 2. 对所有点应用变换
+        transformed_src = warp_3d(src_pts, R, t, s)
+
+        # 3. 计算重投影误差
+        errors = np.linalg.norm(transformed_src - dst_pts, axis=1)
+        inliers = errors < threshold
+
+        # 4. 更新最佳模型
+        inliers_count = np.sum(inliers)
+        if inliers_count > best_inliers_count:
+            best_inliers_count = inliers_count
+            best_R = R
+            best_t = t
+            best_s = s
+            best_mask = inliers
+
+        # 5. 如果内点数量足够多，提前结束
+        if inliers_count >= min_inliers:
+            break
+
+    # 使用所有内点算一个最终的R, t, s
+    if best_inliers_count >= min_inliers:
+        s, R, t, rmse, raw_rmse = compute_similarity_transform(
+            src_pts[best_mask], dst_pts[best_mask]
+        )
+
+    return best_R, best_t, best_s, rmse, raw_rmse
+
+
+
+def estimate_intrinsics(coords):
+    """
+    Args:
+        coords: Tensor of shape (H, W, 3), camera plane points (X, Y, Z)
+    Returns:
+        K: (3, 3) intrinsics estimation result from camera plane points
+    """
+    h, w, _ = coords.shape
+    device = coords.device
  
+    v, u = torch.meshgrid(torch.arange(h, device=device), 
+                          torch.arange(w, device=device), 
+                          indexing='ij')
+    
+    u = u.flatten().float()
+    v = v.flatten().float()
+ 
+    X = coords[..., 0].flatten()
+    Y = coords[..., 1].flatten()
+    Z = coords[..., 2].flatten()
+ 
+    mask = Z > 0
+    u, v, X, Y, Z = u[mask], v[mask], X[mask], Y[mask], Z[mask]
+
+    x_prime = X / Z
+    y_prime = Y / Z
+
+    # A @ x = B
+    # fx, cx: [x' 1] @ [fx, cx]^T = u
+    ones = torch.ones_like(x_prime)
+    
+    # solve x part (fx, cx)
+    A_u = torch.stack([x_prime, ones], dim=1)
+    sol_u = torch.linalg.lstsq(A_u, u).solution
+    fx, cx = sol_u[0], sol_u[1]
+
+    # solve y part (fy, cy)
+    A_v = torch.stack([y_prime, ones], dim=1)
+    sol_v = torch.linalg.lstsq(A_v, v).solution
+    fy, cy = sol_v[0], sol_v[1]
+
+    # assemble intrinsics matrix K
+    K = torch.tensor([
+        [fx, 0,  cx],
+        [0,  fy, cy],
+        [0,  0,  1]
+    ], device=device)
+
+    return K
+
 def voxel2points(pred_occ, mask_camera=None, free_label=0): 
     
     d, h, w = pred_occ.shape  
@@ -301,7 +554,7 @@ def nn_correspondance(verts1, verts2):  # unuse
     return indices, distances
 
 
-def point_transform_3d_batch(loc, M, use_torch=False):
+def point_transform_3d_batch(loc, M):
     """
     Transform a 3D point using a 4x4 matrix
     loc: Nx3 array point location
@@ -312,7 +565,7 @@ def point_transform_3d_batch(loc, M, use_torch=False):
         h, w = loc.shape[0], loc.shape[1]
         loc = loc.reshape(-1, 3)
 
-    if use_torch:
+    if loc.device.type == 'cuda':
         ones = torch.ones((loc.shape[0], 1), device=loc.device)
         point = torch.concat((loc, ones), axis=1)
         point = point.unsqueeze(2)
@@ -335,7 +588,7 @@ def point_transform_3d_batch(loc, M, use_torch=False):
     return point_transformed
 
 
-def point_transform_2d_batch(loc, M, use_torch=False):
+def point_transform_2d_batch(loc, M):
     """
     Transform a 2D point using a 3x3 matrix
     loc: Nx2 array point location
@@ -346,7 +599,7 @@ def point_transform_2d_batch(loc, M, use_torch=False):
         h, w = loc.shape[0], loc.shape[1]
         loc = loc.reshape(-1, 2)
 
-    if use_torch:
+    if loc.device.type == 'cuda':
         ones = torch.ones((loc.shape[0], 1), device=loc.device)
         point = torch.concat((loc, ones), axis=1)
         point = point.unsqueeze(2)
