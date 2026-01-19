@@ -336,24 +336,6 @@ class DataGenerator:
             norm_cam_ray_cam_coords,
         )  # 将norm_cam_ray_cam_coords从世界坐标系变换到相机坐标系
 
-        # 可视化 cam_ray
-        # norm_cam_ray = norm_cam_ray[::20, ::20, :]# 下采样
-        # norm_cam_ray = norm_cam_ray.reshape(-1, 3)
-        # ray_num = 25
-        # ray_points = torch.ones(norm_cam_ray.shape[0], ray_num, 1).to(self.device)
-        # ray_points = ray_points * torch.arange(ray_num, device=self.device).float().reshape(1, ray_num, 1) * 0.02
-        # ray_points = ray_points * norm_cam_ray.unsqueeze(1)
-        # ray_points = ray_points.reshape(-1, 3)
-        # # 尝试将ray_points从ref相机下转到指定相机下
-        # ray_points = ray_points + camera_coord.reshape(1, 3) # 起点放回相机光心
-        # ray_points = homogenize_points(ray_points)
-        # ray_points_cam = torch.einsum('ij,bj->bi', camera_pose_cuda[ref_cam_index * self.interval].inverse(), ray_points)
-        # ray_points = torch.einsum('ij,bj->bi', camera_pose_cuda[tgt_cam_index], ray_points_cam)[:, :3]
-        # # 造个color
-        # ray_points_color = ray_points - ray_points.min()
-        # ray_points_color = ray_points_color / ray_points_color.max()
-        # 目前可以获得任意帧下相机的FOV锥桶点，下一步要根据该FOV区域滤除Occ，需要定义全局Occ大小和局部Occ大小，然后把全局Occ
-        # 根据相机可见区域与相机位姿获得局部Occ，存储方式使用在全局Occ上的Mask还是直接存储局部Occ？
 
         # downsample by open3d
         pcd = pcd.cpu().numpy()  # 模型预测出的全局 3D 坐标 [N, H, W, 3]
@@ -743,481 +725,203 @@ class DataGenerator:
         merged_occ_cam = self.convert_pointcloud_world_to_camera(merged_occ_world, current_pose_matrix)
         
         return merged_occ_cam, merged_occ_world
-    """  
-    可视化版本的occ_pipline      
-    def occ_gen_all_pipeline(self, input_path, pcd_save=False):
-        self.camera_intric = np.array(
-            [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
-            dtype=np.float32,
-        )
+    
+    def _get_io_paths(self, input_path):
+        """生成并创建输出所需的所有路径字典"""
+        
+        # 1. 构建目录
+        data_chunk_dir = os.path.join(self.save_path, "data", "chunk-000")
+        video_chunk_dir = os.path.join(self.save_path, "videos", "chunk-000")
+        occ_view_dir = os.path.join(video_chunk_dir, "observation.occ.view")
+        occ_mask_dir = os.path.join(video_chunk_dir, "observation.occ.mask")
 
-        # 1. 重建全局地图和轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
-            input_path, pcd_save
-        )
+        for d in [data_chunk_dir, video_chunk_dir, occ_view_dir, occ_mask_dir]:
+            if not os.path.exists(d): os.makedirs(d)
 
-        # 2. 生成全局点云
-        self.occ_pcd = self.pcd_to_occ(pcd)
+        # 2. 定义文件路径
+        paths = {
+            'ply': os.path.join(data_chunk_dir, "origin_pcd.ply"),
+            'global_occ': os.path.join(data_chunk_dir, "all_occ.npz"),
+            'parquet': os.path.join(data_chunk_dir, "episode_000000.parquet"),
+            'occ_seq': os.path.join(occ_view_dir, "occ_sequence.npz"),
+            'mask_seq': os.path.join(occ_mask_dir, "mask_sequence.npz")
+        }
+        return paths
 
-        # 3. 如果需要保存
-        if pcd_save:
-            print("Start processing sequence frames...")
+    def _save_global_data(self, paths):
+        """保存全局点云和OCC"""
+        import shutil
+        for p in [paths['ply'], paths['global_occ']]:
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+        
+        write_ply(self.pcd, self.pcd_color, paths['ply'])
+        np.savez_compressed(paths['global_occ'], data=self.occ_pcd.astype(np.float32))
 
-            # --- 1. 创建混合显示 的文件夹 ---
-            ply_dir = os.path.join(
-                self.save_path, "ply_sequence"
-            )  # 存相机坐标系下混合PLY
-            if not os.path.exists(ply_dir):
-                os.makedirs(ply_dir)
+    def _compute_sequence_data(self):
+        """遍历帧，计算 OCC Grid 和收集 Poses"""
+        total_frames = len(self.camera_pose)
+        grid_dims = self.config['occ_size'] 
+        
+        all_frames_voxels = [] 
+        all_frames_cam_mask_voxels = [] 
+        all_camera_poses = [] 
 
-            npy_dir = os.path.join(
-                self.save_path, "npy_sequence"
-            )  # 存相机坐标系下混合NPY
-            if not os.path.exists(npy_dir):
-                os.makedirs(npy_dir)
+        for i in range(total_frames):
+            current_pose = self.camera_pose[i] 
+            
+            # 收集外参: 格式 [Array(row1), Array(row2)...]
+            pose_rows = [row.astype(np.float32) for row in current_pose]
+            all_camera_poses.append(pose_rows)
 
-            ply_world_dir = os.path.join(
-                self.save_path, "ply_sequence_world"
-            )  # 存世界坐标系下混合PLY
-            if not os.path.exists(ply_world_dir):
-                os.makedirs(ply_world_dir)
+            # 计算单帧可见性
+            occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd, current_pose)
+            
+            # 格式转换
+            if isinstance(occ_indices, torch.Tensor):
+                occ_voxel_indices = occ_indices.detach().cpu().numpy()
+            else:
+                occ_voxel_indices = occ_indices
 
-            npy_world_dir = os.path.join(
-                self.save_path, "npy_sequence_world"
-            )  # 存世界坐标系下混合NPY
-            if not os.path.exists(npy_world_dir):
-                os.makedirs(npy_world_dir)
+            if isinstance(cam_visible_mask, torch.Tensor):
+                cam_mask_voxel_indices = cam_visible_mask.detach().cpu().numpy()
+            else:
+                cam_mask_voxel_indices = cam_visible_mask
 
-            # --- 2. 创建【单独 Occ】的文件夹  ---
-            occ_ply_dir = os.path.join(self.save_path, "occ_only_ply")  # 存纯Occ PLY
-            if not os.path.exists(occ_ply_dir):
-                os.makedirs(occ_ply_dir)
+            # --- 1. OCC Grid ---
+            valid_mask_occ = (
+                (occ_voxel_indices[:, 0] >= 0) & (occ_voxel_indices[:, 0] < grid_dims[0]) &
+                (occ_voxel_indices[:, 1] >= 0) & (occ_voxel_indices[:, 1] < grid_dims[1]) &
+                (occ_voxel_indices[:, 2] >= 0) & (occ_voxel_indices[:, 2] < grid_dims[2])
+            )
+            valid_voxels_occ = occ_voxel_indices[valid_mask_occ].astype(np.int64) 
+            
+            frame_grid_occ = np.zeros(grid_dims, dtype=np.uint8)
+            frame_grid_occ[valid_voxels_occ[:, 0], valid_voxels_occ[:, 1], valid_voxels_occ[:, 2]] = 1
+            all_frames_voxels.append(frame_grid_occ)
 
-            occ_npy_dir = os.path.join(self.save_path, "occ_only_npy")  # 存纯Occ NPY
-            if not os.path.exists(occ_npy_dir):
-                os.makedirs(occ_npy_dir)
+            # --- 2. Mask Grid ---
+            valid_mask_cam = (
+                (cam_mask_voxel_indices[:, 0] >= 0) & (cam_mask_voxel_indices[:, 0] < grid_dims[0]) &
+                (cam_mask_voxel_indices[:, 1] >= 0) & (cam_mask_voxel_indices[:, 1] < grid_dims[1]) &
+                (cam_mask_voxel_indices[:, 2] >= 0) & (cam_mask_voxel_indices[:, 2] < grid_dims[2])
+            )
+            valid_voxels_cam = cam_mask_voxel_indices[valid_mask_cam].astype(np.int64)
+            
+            frame_grid_mask = np.zeros(grid_dims, dtype=np.uint8)
+            frame_grid_mask[valid_voxels_cam[:, 0], valid_voxels_cam[:, 1], valid_voxels_cam[:, 2]] = 1
+            all_frames_cam_mask_voxels.append(frame_grid_mask)
 
-            total_frames = len(self.camera_pose)
-            occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
-                self.occ_pcd, self.camera_pose[0]
-            )  # 把世界坐标系下的occ转换到相机坐标系下
-            write_ply(
-                occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
-            )  # 最后一维是颜色 是没有进行mask的，所有点都在相机视野内，一个全局地图
+        return np.stack(all_frames_voxels, axis=0), np.stack(all_frames_cam_mask_voxels, axis=0), all_camera_poses
 
-            #每次跑新视频前，清空历史缓冲区
-            self.occ_history_buffer.clear()
-            for i in range(total_frames):
-                current_pose = self.camera_pose[i]
+    def _update_parquet_metadata(self, parquet_save_path, all_camera_poses, input_path):
+        """更新 Parquet 文件"""
+        print(f"Updating Parquet metadata at {parquet_save_path}...")
+        try:
+            # 回溯 4 层目录找到 trajectory 根目录 (基于 input_path 为 mp4 文件)
+            traj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(input_path))))
+            origin_parquet_path = os.path.join(traj_root, 'data', 'chunk-000', 'episode_000000.parquet')
+            
+            if os.path.exists(origin_parquet_path):
+                df_orig = pd.read_parquet(origin_parquet_path, engine='pyarrow')
+            else:
+                print(f"Error: Original parquet NOT found at {origin_parquet_path}")
+                return 
+        except Exception as e:
+            print(f"Error finding/reading parquet: {e}")
+            return
 
-                # ================= A. 计算数据 =================
+        # 准备数据
+        current_len = len(df_orig)
+        new_col_data = all_camera_poses[:current_len]
+        
+        if len(new_col_data) < current_len:
+            print(f"Warning: Padding {current_len - len(new_col_data)} frames.")
+            new_col_data.extend([None] * (current_len - len(new_col_data)))
 
-                #  计算当前帧可见 Occ (核心数据)
-                occ_indices, _ = self.check_visual_occ(self.occ_pcd, current_pose)
-                single_frame_occ_cam = voxels_to_pcd(
-                    occ_indices, self.voxel_size, self.pc_range
-                )
-                if isinstance(single_frame_occ_cam, torch.Tensor):
-                    single_frame_occ_cam = single_frame_occ_cam.detach().cpu().numpy()
-                if single_frame_occ_cam.shape[1] == 4:
-                    single_frame_occ_cam = single_frame_occ_cam[:, :3]
+        # 添加新列
+        df_orig['observation.camera_extrinsic_occ'] = new_col_data
 
-                # 计算当前帧相机坐标系下的可见Occ转换到世界坐标系下
-                # 公式: P_world = R * P_cam + t
-                single_frame_occ_world = self.convert_pointcloud_camera_to_world(
-                    single_frame_occ_cam, current_pose
-                )
+        # 保存
+        try:
+            df_orig.to_parquet(parquet_save_path, engine='pyarrow')
+            print(f"Successfully updated parquet: {parquet_save_path}")
+        except Exception as e:
+            print(f"Error saving parquet: {e}")
+
+    def _update_json_metadata(self, input_path):
+        """更新 info.json 文件"""
+        import json
+        print(f"Updating info.json metadata...")
+        try:
+            traj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(input_path))))
+            info_json_path = os.path.join(traj_root, "meta", "info.json")
+            
+            if os.path.exists(info_json_path):
+                with open(info_json_path, 'r', encoding='utf-8') as f:
+                    meta_data = json.load(f)
                 
-                # 获取滑动窗口累计后的结果
-                save_flag = (i % self.history_step == 0)
-                local_occ_cam, local_occ_world = self.get_temporal_occ(
-                    single_frame_occ_world, current_pose, save_to_history=save_flag
-                ) #现在的local_occ_cam和local_occ_world都是通过历史帧累计后的结果，前者是当前帧相机坐标系下，后者是世界坐标系下
+                new_occ_feature = {
+                    "dtype": "float32",
+                    "shape": [4, 4],
+                    "names": [
+                        "extrinsic_0_0", "extrinsic_0_1", "extrinsic_0_2", "extrinsic_0_3",
+                        "extrinsic_1_0", "extrinsic_1_1", "extrinsic_1_2", "extrinsic_1_3",
+                        "extrinsic_2_0", "extrinsic_2_1", "extrinsic_2_2", "extrinsic_2_3",
+                        "extrinsic_3_0", "extrinsic_3_1", "extrinsic_3_2", "extrinsic_3_3"
+                    ]
+                }
                 
-                #  计算背景和轨迹 但这个是在相机坐标系下的，用的是occ点云，而不是所有的初始点云 我们现在不用它
-                bg_cam = self.convert_pointcloud_world_to_camera(
-                    self.occ_pcd, current_pose
-                )
-                if bg_cam.shape[1] == 4:
-                    bg_cam = bg_cam[:, :3]
-
-                traj_world = self.camera_pose[:, :3, 3]
-                traj_cam = self.convert_pointcloud_world_to_camera(
-                    traj_world, current_pose
-                )
-                if traj_cam.shape[1] == 4:
-                    traj_cam = traj_cam[:, :3]
-
-                # 我们还是使用世界坐标系下的背景和轨迹！！！注意：这里的背景是初始的点云稠密背景，轨迹是到历史所有到当前帧的轨迹
-                bg_world = self.pcd # 使用的是初始的点云稠密背景
-                traj_current_world = self.camera_pose[0 : i + 1, :3, 3]
-                if bg_world.shape[1] == 4:
-                    bg_world = bg_world[:, :3]
-                if traj_current_world.shape[1] == 4:
-                    traj_current_world = traj_current_world[:, :3]
-
-                # ================= B. 单独保存 通过历史帧累计后的Occ =================
-
-                # 保存单独的 Occ PLY
-                if len(local_occ_cam) > 0:
-                    # 纯绿色用于 PLY 显示
-                    pure_occ_color = np.zeros_like(local_occ_cam)
-                    pure_occ_color[:, 1] = 1.0
-                    write_ply(
-                        local_occ_cam,
-                        pure_occ_color,
-                        os.path.join(occ_ply_dir, f"occ_{i:04d}.ply"),
-                    )
+                if "features" in meta_data:
+                    meta_data["features"]["observation.camera_extrinsic_occ"] = new_occ_feature
+                    with open(info_json_path, 'w', encoding='utf-8') as f:
+                        json.dump(meta_data, f, indent=4)
+                    print(f"Successfully updated info.json")
                 else:
-                    # 如果这帧没有occ，保存一个空文件或者跳过
-                    # write_ply 需要至少一个点，这里简单处理，若空则跳过或存dummy
-                    pass
+                    print(f"Warning: 'features' key not found in {info_json_path}")
+            else:
+                print(f"Warning: info.json not found at {info_json_path}")
+                
+        except Exception as e:
+            print(f"Error updating info.json: {e}")
 
-                # 保存单独的 Occ NPY
-                if len(local_occ_cam) > 0:
-                    # 格式: [X, Y, Z, Label=2]
-                    occ_npy_single = np.concatenate(
-                        [local_occ_cam, np.full((local_occ_cam.shape[0], 1), 2)], axis=1
-                    )
-                    np.save(
-                        os.path.join(occ_npy_dir, f"occ_{i:04d}.npy"),
-                        occ_npy_single.astype(np.float32),
-                    )
-                else:
-                    # 存个空数组，防止读取报错
-                    np.save(
-                        os.path.join(occ_npy_dir, f"occ_{i:04d}.npy"),
-                        np.zeros((0, 4), dtype=np.float32),
-                    )
-
-                # ================= C. 保存相机坐标系下的混合数据 但我目前没用到相机坐标系下的数据 =================
-
-                # 拼装颜色
-                bg_color = np.ones_like(bg_cam) * 0.7
-                traj_color = np.zeros_like(traj_cam)
-                traj_color[:, 0] = 1.0
-
-                occ_color = np.zeros_like(local_occ_cam)
-                if len(occ_color) > 0:
-                    occ_color[:, 1] = 1.0
-
-                # 拼装列表
-                points_list = [bg_cam, traj_cam] #相机坐标系下的occ背景和轨迹
-                colors_list = [bg_color, traj_color]
-                if len(local_occ_cam) > 0:
-                    points_list.append(local_occ_cam) #相机坐标系下的累计版本的可见occ
-                    colors_list.append(occ_color)
-
-                final_points = np.concatenate(points_list, axis=0)
-                final_colors = np.concatenate(colors_list, axis=0)
-
-                # 保存混合 PLY
-                write_ply(
-                    final_points,
-                    final_colors,
-                    os.path.join(ply_dir, f"frame_{i:04d}.ply"),
-                )
-
-                # 保存混合 NPY (带标签)
-                bg_npy = np.concatenate(
-                    [bg_cam, np.zeros((bg_cam.shape[0], 1))], axis=1
-                )  # Label 0
-                traj_npy = np.concatenate(
-                    [traj_cam, np.ones((traj_cam.shape[0], 1))], axis=1
-                )  # Label 1
-
-                if len(local_occ_cam) > 0:
-                    occ_npy = np.concatenate(
-                        [local_occ_cam, np.full((local_occ_cam.shape[0], 1), 2)], axis=1
-                    )  # Label 2
-                    final_npy_data = np.concatenate([bg_npy, traj_npy, occ_npy], axis=0)
-                else:
-                    final_npy_data = np.concatenate([bg_npy, traj_npy], axis=0)
-
-                np.save(
-                    os.path.join(npy_dir, f"frame_{i:04d}.npy"),
-                    final_npy_data.astype(np.float32),
-                )
-
-                # ================= D. 保存世界坐标系下的混合数据 (支持真彩色) =================
-
-                bg_world_dense = bg_world # (N, 3)
-
-                # 获取背景颜色
-                if hasattr(self, "pcd_color"):
-                    bg_color_dense = self.pcd_color  # (N, 3) 假设是 0-1 的 float
-                else:
-                    bg_color_dense = np.ones_like(bg_world_dense) * 0.7
-
-                # 维度对齐
-                min_len = min(len(bg_world_dense), len(bg_color_dense))
-                bg_world_dense = bg_world_dense[:min_len]
-                bg_color_dense = bg_color_dense[:min_len]
-
-                # 构造背景 NPY: [x, y, z, r, g, b, 0]
-                bg_label = np.zeros((min_len, 1))  # Label 0
-                bg_npy = np.concatenate(
-                    [bg_world_dense, bg_color_dense, bg_label], axis=1
-                )
-
-                #  构造轨迹 NPY: [x, y, z, 0, 0, 1, 1] (蓝色占位，视频脚本会重绘，但格式要对)
-                traj_len = len(traj_current_world)
-                if traj_len > 0:
-                    traj_rgb = np.tile([0.0, 0.0, 1.0], (traj_len, 1))  # 全蓝
-                    traj_label = np.ones((traj_len, 1))  # Label 1
-                    traj_npy = np.concatenate(
-                        [traj_current_world, traj_rgb, traj_label], axis=1
-                    )
-                else:
-                    traj_npy = np.zeros((0, 7))
-
-                #  构造 OCC NPY: [x, y, z, 0.5, 0.5, 0.5, 2] (灰色占位)
-                occ_len = len(local_occ_world) # 累计版本的世界坐标系下的可见occ
-                if occ_len > 0:
-                    occ_rgb = np.tile([0.5, 0.5, 0.5], (occ_len, 1))  # 全灰
-                    occ_label = np.full((occ_len, 1), 2)  # Label 2
-                    occ_npy = np.concatenate(
-                        [local_occ_world, occ_rgb, occ_label], axis=1
-                    )
-                else:
-                    occ_npy = np.zeros((0, 7))
-
-                final_npy_data = np.concatenate([bg_npy, traj_npy, occ_npy], axis=0)
-
-                # 保存为 (N, 7) 的 NPY
-                np.save(
-                    os.path.join(npy_world_dir, f"frame_{i:04d}_world.npy"),
-                    final_npy_data.astype(np.float32),
-                )
-
-                # 同时保存 PLY (用于 MeshLab 查看)
-                # PLY只需要 points 和 colors，不需要 label
-                # 这里的 final_npy_data 前3列是xyz，中间3列是rgb
-                write_ply(
-                    final_npy_data[:, :3],
-                    final_npy_data[:, 3:6],
-                    os.path.join(ply_world_dir, f"frame_{i:04d}_world.ply"),
-                )
-
-                if i % 10 == 0:
-                    print(f"Processed frame {i}/{total_frames}")
-    """
 
     def occ_gen_compressed_pipeline(self, input_path, pcd_save=False):
-        # 1.设置相机内参
+        """整个 OCC 生成、保存和元数据更新的流程"""
+        
+        #  注入默认内参 
         if self.camera_intric is None:
             self.camera_intric = np.array(
                 [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
                 dtype=np.float32,
             )
 
-        # 2. 重建全局地图和轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
-            input_path, pcd_save
-        )
-
-        # . 生成全局occ点云
+        # 三维重建 & 全局 OCC 生成
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(input_path, pcd_save)
         self.occ_pcd = self.pcd_to_occ(pcd)
 
         if pcd_save:
             print("Start processing sequence frames...")
             
-            # --- 创建文件目录 ---
-            # 1. /data/chunk-000
-            data_chunk_dir = os.path.join(self.save_path, "data", "chunk-000")
-            if not os.path.exists(data_chunk_dir): os.makedirs(data_chunk_dir)
-
-            origin_ply_dir = os.path.join(data_chunk_dir, "origin_pcd.ply")
-            all_occ_npz_dir = os.path.join(data_chunk_dir, "all_occ.npz")
+            # --- 1: 生成并创建所有需要的路径 ---
+            paths = self._get_io_paths(input_path)
             
-            parquet_save_dir = os.path.join(data_chunk_dir) # 存在 chunk-000 根目录下
-            parquet_save_path = os.path.join(parquet_save_dir, "episode_000000.parquet")
-            
-            # 2. /videos/chunk-000/...
-            video_chunk_dir = os.path.join(self.save_path, "videos", "chunk-000")
-            occ_view_dir = os.path.join(video_chunk_dir, "observation.occ.view")
-            if not os.path.exists(occ_view_dir): os.makedirs(occ_view_dir)
-            occ_mask_dir = os.path.join(video_chunk_dir, "observation.occ.mask")
-            if not os.path.exists(occ_mask_dir): os.makedirs(occ_mask_dir)
+            # --- 2: 保存全局 PCD 和 OCC ---
+            self._save_global_data(paths)
 
-            save_occ_path_npz = os.path.join(occ_view_dir, "occ_sequence.npz")
-            save_cam_mask_path_npz = os.path.join(occ_mask_dir, "mask_sequence.npz")
+            # --- 3: 核心计算 (生成每一帧的 4D OCC Grid 和 Pose List) ---
+            arr_4d_occ, arr_4d_mask, all_camera_poses = self._compute_sequence_data()
 
+            # --- 4: 保存 4D 压缩序列 ---
+            print("Saving 4D Sequence Arrays...")
+            np.savez_compressed(paths['occ_seq'], data=arr_4d_occ)
+            np.savez_compressed(paths['mask_seq'], data=arr_4d_mask)
+            print(f"Saved 4D Sequence shape: {arr_4d_occ.shape}")
 
-            #保存总的点云.ply 和全部occ.npz
-            write_ply(
-                self.pcd,
-                self.pcd_color,
-                origin_ply_dir,
-            )
-            np.savez_compressed(
-                all_occ_npz_dir,
-                data=self.occ_pcd.astype(np.float32),
-            )
-
-
-            total_frames = len(self.camera_pose)
-        
-            # 初始化 4D 数据的临时容器
-            # 我们需要知道最终网格的尺寸 (H, W, D)。
-            grid_dims = self.config['occ_size'] 
-            all_frames_voxels = [] # (N, 3)
-            all_frames_cam_mask_voxels = [] # (N, 3)
-            all_camera_poses = [] # (N, 4, 4)
-
-            for i in range(total_frames):
-                current_pose = self.camera_pose[i] # (4, 4) matrix
-                #收集外参
-                pose_rows = [row.astype(np.float32) for row in current_pose]
-                all_camera_poses.append(pose_rows)
-
-                # ================= A. 计算数据 =================
-                #  计算单帧
-                occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd, current_pose)
-               
-                # 格式转换
-                if isinstance(occ_indices, torch.Tensor):
-                    occ_voxel_indices = occ_indices.detach().cpu().numpy()
-                else:
-                    occ_voxel_indices = occ_indices
-
-                if isinstance(cam_visible_mask, torch.Tensor):
-                    cam_mask_voxel_indices = cam_visible_mask.detach().cpu().numpy()
-                else:
-                    cam_mask_voxel_indices = cam_visible_mask
-
-
-                # 过滤可见occ越界点 (只保留在 occ_size 范围内的点)
-                valid_mask_occ = (
-                    (occ_voxel_indices[:, 0] >= 0) & (occ_voxel_indices[:, 0] < grid_dims[0]) &
-                    (occ_voxel_indices[:, 1] >= 0) & (occ_voxel_indices[:, 1] < grid_dims[1]) &
-                    (occ_voxel_indices[:, 2] >= 0) & (occ_voxel_indices[:, 2] < grid_dims[2])
-                )
-
-                valid_voxels_occ = occ_voxel_indices[valid_mask_occ].astype(np.int64) 
-                frame_grid_occ = np.zeros(grid_dims, dtype=np.uint8)
-                
-                frame_grid_occ[valid_voxels_occ[:, 0], valid_voxels_occ[:, 1], valid_voxels_occ[:, 2]] = 1
-                all_frames_voxels.append(frame_grid_occ)
-
-                # --- 2. Mask Grid ---
-                valid_mask_cam = (
-                    (cam_mask_voxel_indices[:, 0] >= 0) & (cam_mask_voxel_indices[:, 0] < grid_dims[0]) &
-                    (cam_mask_voxel_indices[:, 1] >= 0) & (cam_mask_voxel_indices[:, 1] < grid_dims[1]) &
-                    (cam_mask_voxel_indices[:, 2] >= 0) & (cam_mask_voxel_indices[:, 2] < grid_dims[2])
-                )
-    
-                valid_voxels_cam = cam_mask_voxel_indices[valid_mask_cam].astype(np.int64)
-                
-                frame_grid_mask = np.zeros(grid_dims, dtype=np.uint8)
-                # Now valid_voxels_cam is definitely integer
-                frame_grid_mask[valid_voxels_cam[:, 0], valid_voxels_cam[:, 1], valid_voxels_cam[:, 2]] = 1
-                all_frames_cam_mask_voxels.append(frame_grid_mask)
-
-            # =================B 现在我们只需要 保存 4D 压缩文件 N*H*W*C N代表N帧 =================
-            print("Converting to 4D Sparse Matrix...")
-            
-            # 堆叠成 4D Numpy 数组 (N, H, W, D)
-            arr_4d_occ = np.stack(all_frames_voxels, axis=0) # Shape: (Total_Frames, H, W, D)
-            arr_4d_cam_mask = np.stack(all_frames_cam_mask_voxels, axis=0) # Shape: (Total_Frames, H, W, D)
-            
-            # 方式一：np.savez_compressed 
-            np.savez_compressed(save_occ_path_npz, data=arr_4d_occ)
-            print(f"Saved compressed 4D array to {save_occ_path_npz}, Shape: {arr_4d_occ.shape}")
-            
-            # 保存 cam_mask 也同理
-            np.savez_compressed(save_cam_mask_path_npz, data=arr_4d_cam_mask)
-            print(f"Saved compressed 4D array to {save_cam_mask_path_npz}, Shape: {arr_4d_cam_mask.shape}")
-
-
-            # ================= 读取原有 Parquet 并追加新列 =================
-            print(f"Updating Parquet metadata at {parquet_save_path}...")
-
-            #  寻找原始 Parquet 文件路径
-            try:
-                # 回溯 4 层目录找到 trajectory 根目录
-                traj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(input_path))))
-                origin_parquet_path = os.path.join(traj_root, 'data', 'chunk-000', 'episode_000000.parquet')
-                
-                if os.path.exists(origin_parquet_path):
-                    # 读取原始数据到 df_orig
-                    df_orig = pd.read_parquet(origin_parquet_path, engine='pyarrow')
-                    print(f"Loaded original parquet with {len(df_orig)} rows and columns: {df_orig.columns.tolist()}")
-                else:
-                    # 如果找不到原文件，直接报错返回
-                    print(f"Error: Original parquet NOT found at {origin_parquet_path}. Cannot append column.")
-                    return 
-            except Exception as e:
-                print(f"Error finding/reading original parquet: {e}")
-                return
-
-            # 2. 准备新列的数据 
-            current_len = len(df_orig)
-            
-            # 直接使用我们在循环中构建好的 list-of-arrays
-            new_col_data = all_camera_poses[:current_len]
-            
-            # 补齐 
-            if len(new_col_data) < current_len:
-                print(f"Warning: Padding {current_len - len(new_col_data)} frames.")
-                new_col_data.extend([None] * (current_len - len(new_col_data)))
-
-            # 3. 添加新列
-            df_orig['observation.camera_extrinsic_occ'] = new_col_data
-
-            # 4. 保存
-            try:
-                df_orig.to_parquet(parquet_save_path, engine='pyarrow')
-                print(f" Successfully SAVED updated parquet to {parquet_save_path}")
-            except Exception as e:
-                print(f" Error saving parquet: {e}")
-            
-
-            # =================  更新 info.json  新增 features 关于cam_ex_occ的描述 =================
-            print(f"Updating info.json metadata...")
-            
-            try:
-                if 'traj_root' not in locals():
-                     # 如果之前没定义，这里重新定义一次 (回溯4层)
-                     traj_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(input_path))))
-
-                info_json_path = os.path.join(traj_root, "meta", "info.json")
-                
-                if os.path.exists(info_json_path):
-                    # 1. 读取原有 json
-                    with open(info_json_path, 'r', encoding='utf-8') as f:
-                        meta_data = json.load(f)
-                    
-                    # 2. 定义新 Feature 结构
-                    new_occ_feature = {
-                        "dtype": "float32",
-                        "shape": [4, 4],
-                        "names": [
-                            "extrinsic_0_0", "extrinsic_0_1", "extrinsic_0_2", "extrinsic_0_3",
-                            "extrinsic_1_0", "extrinsic_1_1", "extrinsic_1_2", "extrinsic_1_3",
-                            "extrinsic_2_0", "extrinsic_2_1", "extrinsic_2_2", "extrinsic_2_3",
-                            "extrinsic_3_0", "extrinsic_3_1", "extrinsic_3_2", "extrinsic_3_3"
-                        ]
-                    }
-                    
-                    # 3. 插入到 features 中
-                    if "features" in meta_data:
-                        # 直接赋值/覆盖
-                        meta_data["features"]["observation.camera_extrinsic_occ"] = new_occ_feature
-                        
-                        # 4. 写回文件
-                        with open(info_json_path, 'w', encoding='utf-8') as f:
-                            json.dump(meta_data, f, indent=4)
-                        
-                        print(f"Successfully updated info.json at {info_json_path}")
-                    else:
-                        print(f"Warning: 'features' key not found in {info_json_path}, skipping update.")
-                else:
-                    print(f"Warning: info.json not found at {info_json_path}")
-                    
-            except Exception as e:
-                print(f" Error updating info.json: {e}")
-        
+            # --- 5: 更新元数据 (Parquet 和 JSON) ---
+            # 这里的 input_path 是原始视频路径，用于回溯根目录
+            self._update_parquet_metadata(paths['parquet'], all_camera_poses, input_path)
+            self._update_json_metadata(input_path)
 
 # ================= 主函数 =================
 
@@ -1229,23 +933,7 @@ if __name__ == "__main__":
 
     input_path = "/mnt/data/huangbinling/project/occgen/inputs"
     video_name = "office.mp4"
-
-    # 初始化
     generator = DataGenerator(config_path, save_dir, model_dir)
-
-    # 运行 Pipeline 并开启保存 (pcd_save=True)
-    # 这会在 outputs/frame_sequence/ 下生成几百个 .ply 文件
     generator.occ_gen_compressed_pipeline(os.path.join(input_path, video_name), pcd_save=True)
 
-"""
-if __name__=="__main__":
 
-    config_path='./occ/config.yaml'
-    save_dir="./outputs"
-    model_dir = "./ckpt"
-
-    input_path = "/mnt/data/huangbinling/project/occgen/inputs"
-    video_name = "1.mp4"
-    generator = DataGenerator(config_path, save_dir, model_dir)
-    generator.occ_gen_pipeline(os.path.join(input_path, video_name), pcd_save=True)
-"""
