@@ -88,6 +88,7 @@ class InternNavSequenceLoader:
             df = pd.read_parquet(data_path)
             # 提取相机内参 [fx, 0, cx, 0, fy, cy, 0, 0, 1] -> (3,3)
             camera_intrinsic = np.vstack(np.array(df['observation.camera_intrinsic'].tolist()[0])).reshape(3, 3)
+            print(f"Loaded camera intrinsic for trajectory {index}: {camera_intrinsic}")
         except Exception as e:
             print(f"Error reading parquet {data_path}: {e}")
             # 如果读取失败，返回 None，外部代码需要处理 None 的情况

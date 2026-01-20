@@ -13,6 +13,7 @@ from collections import deque
 from scipy import sparse
 import pandas as pd
 
+
 # from pi3.utils.geometry import homogenize_points
 from pi3.utils.geometry import depth_edge
 from pi3.models.pi3 import Pi3
@@ -276,61 +277,6 @@ class DataGenerator:
 
         return occ_pcd
 
-    # 从一段视频流中还原出场景的三维空间占据情况（Occupancy）以及相机的运动轨迹
-    def occ_gen_pipeline(self, input_path, pcd_save=False):
-        """
-        该方法可以根据整段episode视频得到估计的occ和相机姿态轨迹
-        输入: input_path, 视频路径
-        输出: self.occ, 估计的occ地图 (世界坐标系下)
-            self.camera_pose, 估计的相机姿态轨迹 (世界坐标系下)
-        """
-        self.camera_intric = np.array(
-            [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
-            dtype=np.float32,
-        )  # 临时的， 实际应该根据input_path读出来
-        # get the pcd with camera pose 三维重建，得到点云以及相机姿态轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
-            input_path, pcd_save
-        )  # 点云pcd是世界坐标系下的点云，相机姿态轨迹self.camera_pose是世界坐标系下的相机姿态轨迹，norm_cam_ray是相机在相机坐标系下的单位射线方向
-        # generate the occ map
-        self.occ_pcd = self.pcd_to_occ(
-            pcd
-        )  # 目前在世界坐标系下, 且仍属于点云状态，只不过是进行了下采样，每个格子只有一个点，但是无label
-        occ_voxels_visual_0, visual_mask_0 = self.check_visual_occ(
-            self.occ_pcd, self.camera_pose[0]
-        )  # 检查occ在相机0下是否可见
-        if pcd_save:  # save the occ map
-            save_path = input_path.split("videos/")[
-                0
-            ]  # input_path like: .../InternData-N1/vln_n1/traj_data/matterport3d_zed/gTV8FGcVJC9/trajectory_47/videos/chunk-000/observation.video.trajectory
-            occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
-                self.occ_pcd, self.camera_pose[0]
-            )  # 把世界坐标系下的occ转换到相机坐标系下
-            write_ply(
-                occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
-            )  # 最后一维是颜色 是没有进行mask的，所有点都在相机视野内，一个全局地图
-            occ_pcd_cam_0 = np.concatenate(
-                [occ_pcd_cam_0, np.ones((occ_pcd_cam_0.shape[0], 1))], axis=1
-            )
-            np.save(os.path.join(self.save_path, "occ_pcd_cam0.npy"), occ_pcd_cam_0)
-
-            occ_pcd_visual_0 = voxels_to_pcd(
-                occ_voxels_visual_0, self.voxel_size, self.pc_range
-            )  # 把“格子编号” 乘回 “格子大小”，加回 “偏移量”，变回 “米”（相机坐标系下的坐标）
-            write_ply(
-                occ_pcd_visual_0[:, :3],
-                path=os.path.join(self.save_path, "occ_visual.ply"),
-            )  # 最后一维是颜色, 是在相机0下可见的occ voxels，这是第 0 帧这一刻相机能看到的“表皮”
-            if isinstance(occ_pcd_visual_0, torch.Tensor):
-                occ_pcd_visual_0 = occ_pcd_visual_0.cpu().numpy()
-            occ_pcd_visual_0 = np.concatenate(
-                [occ_pcd_visual_0, np.ones((occ_pcd_visual_0.shape[0], 1))], axis=1
-            )
-            np.save(
-                os.path.join(self.save_path, "occ_pcd_visual_cam0.npy"),
-                occ_pcd_visual_0,
-            )
-
     def check_visual_occ(self, occ_pcd, camera_pose):
         """
         检查occ在指定相机下是否可见
@@ -552,6 +498,162 @@ class DataGenerator:
         merged_occ_cam = self.convert_pointcloud_world_to_camera(merged_occ_world, current_pose_matrix)
         
         return merged_occ_cam, merged_occ_world
+
+    def get_io_paths(self, input_path):
+        """定义文件路径"""
+        # 父类提供一个默认的结构，子类可以改写为复杂的目录结构
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        if not os.path.exists(self.save_path): os.makedirs(self.save_path)
+        return {
+            'ply': os.path.join(self.save_path, f"{base_name}_global.ply"),
+            'global_occ': os.path.join(self.save_path, f"{base_name}_global_occ.npz"),
+            'occ_seq': os.path.join(self.save_path, f"{base_name}_occ_seq.npz"),
+            'mask_seq': os.path.join(self.save_path, f"{base_name}_mask_seq.npz"),
+        }
+
+    def save_global_data(self, paths):
+        """保存全局点云和OCC"""
+        import shutil
+        for p in [paths['ply'], paths['global_occ']]:
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+        
+        write_ply(self.pcd, self.pcd_color, paths['ply'])
+        np.savez_compressed(paths['global_occ'], data=self.occ_pcd.astype(np.float32))
+    
+    def save_sequence_data(self, paths, arr_4d_occ, arr_4d_mask):
+        """保存序列数据"""
+        if 'occ_seq' in paths:
+            np.savez_compressed(paths['occ_seq'], data=arr_4d_occ)
+            print(f"Saved OCC Seq: {arr_4d_occ.shape}")
+            
+        if 'mask_seq' in paths:
+            np.savez_compressed(paths['mask_seq'], data=arr_4d_mask)
+
+    def update_metadata(self, paths, all_camera_poses, all_camera_intrinsics, input_path):
+        """更新 Parquet文件"""
+        pass
+
+    def compute_sequence_data(self):
+        """
+        核心计算循环：生成每一帧的 4D OCC Grid、Mask 以及收集 Pose 和 Intrinsic
+        返回: (arr_4d_occ, arr_4d_mask, all_poses, all_intrinsics)
+        """
+        total_frames = len(self.camera_pose)
+        grid_dims = self.config['occ_size']
+        
+        all_frames_voxels = [] 
+        all_frames_cam_mask_voxels = [] 
+        all_camera_poses = [] 
+        
+        # --- 准备内参 (广播模式) ---
+        current_intrinsic = self.camera_intric_rs
+        if hasattr(current_intrinsic, 'detach'): 
+            current_intrinsic = current_intrinsic.detach().cpu().numpy()
+        current_intrinsic = current_intrinsic.astype(np.float32)
+        
+        # 构造内参列表 (List of Lists)
+        intrinsic_rows = [row for row in current_intrinsic]
+        # 使用列表生成式创建独立副本，避免引用问题
+        all_camera_intrinsics = [[row.copy() for row in intrinsic_rows] for _ in range(total_frames)]
+
+        # --- 循环每一帧 ---
+        for i in range(total_frames):
+            current_pose = self.camera_pose[i]
+            
+            # 1. 收集外参
+            pose_rows = [row.astype(np.float32) for row in current_pose]
+            all_camera_poses.append(pose_rows)
+
+            # 2. 计算可见性 (Ray Casting)
+            occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd, current_pose)
+            
+            if isinstance(occ_indices, torch.Tensor): occ_indices = occ_indices.detach().cpu().numpy()
+            if isinstance(cam_visible_mask, torch.Tensor): cam_visible_mask = cam_visible_mask.detach().cpu().numpy()
+
+            # 3. 生成 OCC Grid (Sparse indices -> Dense Grid)
+            # 过滤越界点
+            valid_mask_occ = (
+                (occ_indices[:, 0] >= 0) & (occ_indices[:, 0] < grid_dims[0]) &
+                (occ_indices[:, 1] >= 0) & (occ_indices[:, 1] < grid_dims[1]) &
+                (occ_indices[:, 2] >= 0) & (occ_indices[:, 2] < grid_dims[2])
+            )
+            valid_voxels_occ = occ_indices[valid_mask_occ].astype(np.int64) 
+            frame_grid_occ = np.zeros(grid_dims, dtype=np.uint8)
+            frame_grid_occ[valid_voxels_occ[:, 0], valid_voxels_occ[:, 1], valid_voxels_occ[:, 2]] = 1
+            all_frames_voxels.append(frame_grid_occ)
+
+            # 4. 生成 Mask Grid
+            valid_mask_cam = (
+                (cam_visible_mask[:, 0] >= 0) & (cam_visible_mask[:, 0] < grid_dims[0]) &
+                (cam_visible_mask[:, 1] >= 0) & (cam_visible_mask[:, 1] < grid_dims[1]) &
+                (cam_visible_mask[:, 2] >= 0) & (cam_visible_mask[:, 2] < grid_dims[2])
+            )
+            valid_voxels_cam = cam_visible_mask[valid_mask_cam].astype(np.int64)
+            frame_grid_mask = np.zeros(grid_dims, dtype=np.uint8)
+            frame_grid_mask[valid_voxels_cam[:, 0], valid_voxels_cam[:, 1], valid_voxels_cam[:, 2]] = 1
+            all_frames_cam_mask_voxels.append(frame_grid_mask)
+
+        # 堆叠成 4D 数组 (T, H, W, D)
+        arr_4d_occ = np.stack(all_frames_voxels, axis=0)
+        arr_4d_mask = np.stack(all_frames_cam_mask_voxels, axis=0)
+
+        return arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics
+    
+    # 单帧版本的occ_pipline      
+    def occ_gen_pipeline(self, input_path, pcd_save=False):
+        """
+        该方法可以根据整段episode视频得到估计的occ和相机姿态轨迹
+        输入: input_path, 视频路径
+        输出: self.occ, 估计的occ地图 (世界坐标系下)
+            self.camera_pose, 估计的相机姿态轨迹 (世界坐标系下)
+        """
+        self.camera_intric = np.array(
+            [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )  # 临时的， 实际应该根据input_path读出来
+        # get the pcd with camera pose 三维重建，得到点云以及相机姿态轨迹
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
+            input_path, pcd_save
+        )  # 点云pcd是世界坐标系下的点云，相机姿态轨迹self.camera_pose是世界坐标系下的相机姿态轨迹，norm_cam_ray是相机在相机坐标系下的单位射线方向
+        # generate the occ map
+        self.occ_pcd = self.pcd_to_occ(
+            pcd
+        )  # 目前在世界坐标系下, 且仍属于点云状态，只不过是进行了下采样，每个格子只有一个点，但是无label
+        occ_voxels_visual_0, visual_mask_0 = self.check_visual_occ(
+            self.occ_pcd, self.camera_pose[0]
+        )  # 检查occ在相机0下是否可见
+        if pcd_save:  # save the occ map
+            save_path = input_path.split("videos/")[
+                0
+            ]  # input_path like: .../InternData-N1/vln_n1/traj_data/matterport3d_zed/gTV8FGcVJC9/trajectory_47/videos/chunk-000/observation.video.trajectory
+            occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
+                self.occ_pcd, self.camera_pose[0]
+            )  # 把世界坐标系下的occ转换到相机坐标系下
+            write_ply(
+                occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
+            )  # 最后一维是颜色 是没有进行mask的，所有点都在相机视野内，一个全局地图
+            occ_pcd_cam_0 = np.concatenate(
+                [occ_pcd_cam_0, np.ones((occ_pcd_cam_0.shape[0], 1))], axis=1
+            )
+            np.save(os.path.join(self.save_path, "occ_pcd_cam0.npy"), occ_pcd_cam_0)
+
+            occ_pcd_visual_0 = voxels_to_pcd(
+                occ_voxels_visual_0, self.voxel_size, self.pc_range
+            )  # 把“格子编号” 乘回 “格子大小”，加回 “偏移量”，变回 “米”（相机坐标系下的坐标）
+            write_ply(
+                occ_pcd_visual_0[:, :3],
+                path=os.path.join(self.save_path, "occ_visual.ply"),
+            )  # 最后一维是颜色, 是在相机0下可见的occ voxels，这是第 0 帧这一刻相机能看到的“表皮”
+            if isinstance(occ_pcd_visual_0, torch.Tensor):
+                occ_pcd_visual_0 = occ_pcd_visual_0.cpu().numpy()
+            occ_pcd_visual_0 = np.concatenate(
+                [occ_pcd_visual_0, np.ones((occ_pcd_visual_0.shape[0], 1))], axis=1
+            )
+            np.save(
+                os.path.join(self.save_path, "occ_pcd_visual_cam0.npy"),
+                occ_pcd_visual_0,
+            )
 
     # 可视化版本的occ_pipline      
     def occ_gen_all_pipeline(self, input_path, pcd_save=False):
@@ -806,7 +908,8 @@ class DataGenerator:
 
                 if i % 10 == 0:
                     print(f"Processed frame {i}/{total_frames}")
- 
+    
+    # 压缩npz版本的occ_pipline      
     def occ_gen_compressed_pipeline(self, input_path, pcd_save=False):
         # 1.设置相机内参
         if self.camera_intric is None:
@@ -1021,7 +1124,39 @@ class DataGenerator:
                     
             except Exception as e:
                 print(f" Error updating info.json: {e}")
+   
+    #解耦后的最终run_pipeline
+    def run_pipeline(self, input_path, pcd_save=True):
+        """
+        重建 -> 路径 -> 存全局 -> 算序列 -> 存序列 -> 更新元数据
+        """
+        # 初始化
+        if self.camera_intric is None:
+            self.camera_intric = np.array([[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32)
+
+        # 三维重建 
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(input_path, pcd_save)
+        self.occ_pcd = self.pcd_to_occ(pcd)
+
+        if not pcd_save: return
+
+        print("Start processing sequence frames...")
         
+        # 获取路径
+        paths = self.get_io_paths(input_path)
+        
+        # 保存全局数据
+        self.save_global_data(paths)
+
+        # 执行核心计算
+        arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = self.compute_sequence_data()
+
+        # 保存序列数据
+        print("Saving 4D Sequence Arrays...")
+        self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
+
+        #  更新元数据
+        self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
 
 # ================= 主函数 =================
 

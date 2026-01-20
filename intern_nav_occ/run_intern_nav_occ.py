@@ -4,7 +4,7 @@ import numpy as np
 import traceback
 import torch
 
-from vln_occ import DataGenerator 
+from intern_vln_env import InternNavDataGenerator
 from intern_nav_adapter import InternNavSequenceLoader
 sys.path.append('.') 
 
@@ -16,10 +16,10 @@ def run_dataset_pipeline():
     # ================= 1. 配置参数 =================
     
     # 数据集根目录 
-    dataset_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e1/traj_data/" 
+    dataset_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/" 
     
     # 输出结果的根目录
-    output_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e1/traj_data/"
+    output_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/"
     
     # 模型 Checkpoint 路径
     model_dir = os.path.join(project_root, "ckpt")
@@ -34,7 +34,7 @@ def run_dataset_pipeline():
     print(f"扫描完成，共发现 {len(loader)} 条轨迹。")
 
     print("初始化 OCC 生成器...")
-    generator = DataGenerator(
+    generator = InternNavDataGenerator(
         config_path=config_path, 
         save_dir=output_root, # 临时根目录，后面会针对每条轨迹修改
         model_dir=model_dir
@@ -94,13 +94,12 @@ def run_dataset_pipeline():
 
             # D. 运行核心管线
             # pcd_save=True 才会执行保存逻辑
-            generator.occ_gen_compressed_pipeline(input_path_for_gen, pcd_save=True)
+            generator.run_pipeline(input_path_for_gen, pcd_save=True)
             
             print("处理成功！")
 
         except Exception as e:
             print(f"处理失败: {e}")
-            # 打印详细报错堆栈，方便调试
             traceback.print_exc()
             continue
 

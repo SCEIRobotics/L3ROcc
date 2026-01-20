@@ -2,10 +2,10 @@ import pandas as pd
 import os
 
 # 1. 原始 Parquet 文件路径
-parquet_path = "/mnt/data/huangbinling/project/occgen/traj_data/gibson_d435i/Ackermanville/trajectory_14/data/chunk-000/episode_000000.parquet"
+parquet_path = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/3d/111/trajectory_15/data/chunk-000/episode_000000.parquet"
 
 # 2. 输出 CSV 路径 (保存到当前运行脚本的目录下，方便你找到)
-output_csv_path = "./episode_000004_view.csv"
+output_csv_path = "./episode_00000_view.csv"
 
 try:
     print(f"⏳ 正在读取 Parquet 文件: {parquet_path} ...")

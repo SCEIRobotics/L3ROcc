@@ -34,5 +34,6 @@ ckpts
 /e6
 /small_vln_n1
 /small_vln_n1_split_e1
+/small_vln_n1_split_e2
 resize_demo_imgs.py
 img_dir_to_video.py
