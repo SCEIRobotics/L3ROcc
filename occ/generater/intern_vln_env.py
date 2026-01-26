@@ -21,7 +21,7 @@ from pi3.utils.basic import (
     write_ply,
 )
 
-from vln_env import DataGenerator
+from occ.dataset.vln_env import DataGenerator
 
 
 class InternNavDataGenerator(DataGenerator):
