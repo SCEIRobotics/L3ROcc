@@ -44,7 +44,9 @@ ckpts
 /debug_e3
 /debug_e4
 /debug_seg_fault
-/tools
+/utils/benchmark
+/utils/calc
+/utils/vis
 /all_outputs
 resize_demo_imgs.py
 img_dir_to_video.py
