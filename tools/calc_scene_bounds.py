@@ -72,5 +72,5 @@ def analyze_dataset_bounds(dataset_root, sample_ratio=0.1):
 
 if __name__ == "__main__":
     # 修改为你的数据集路径
-    DATASET_ROOT = "/mnt/data/huangbinling/project/occgen/e2/traj_data/"
+    DATASET_ROOT = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/"
     analyze_dataset_bounds(DATASET_ROOT, sample_ratio=1.0) # 采样 100% 的文件进行估算

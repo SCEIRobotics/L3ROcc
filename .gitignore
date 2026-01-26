@@ -33,7 +33,17 @@ ckpts
 /e5
 /e6
 /small_vln_n1
+/small_vln_n1_2
+/small_vln_n1_3
+/small_vln_n1_4
 /small_vln_n1_split_e1
 /small_vln_n1_split_e2
+/small_vln_n1_split_e3
+/small_vln_n1_split_e4
+/debug_e2
+/debug_e3
+/debug_e4
+/debug_seg_fault
+/tools
 resize_demo_imgs.py
 img_dir_to_video.py

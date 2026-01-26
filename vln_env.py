@@ -1,4 +1,6 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1" 
+os.environ["MKL_NUM_THREADS"] = "1"#OpenMP 线程冲突
 # set gpu
 os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
@@ -78,7 +80,7 @@ class DataGenerator:
         self.occ_history_buffer = deque(maxlen=self.history_len) # 创建一个定长队列，自动挤出旧数据
         self.save_path = self.save_dir
 
-    def pcd_reconstuction(self, input_path, pcd_save=False):
+    def pcd_reconstruction(self, input_path, pcd_save=False):   
         imgs, traj_len = load_images_as_tensor(
             input_path, interval=self.interval
         )  # 将一段视频中的所有帧按照interval=10帧读取出来，并统一缩放到相同的大小，最后转换成一个深度学习模型可以直接使用的Tensor[N, 3, H, W]，N为视频总帧数traj_len除以interval
@@ -164,6 +166,12 @@ class DataGenerator:
         # 根据相机可见区域与相机位姿获得局部Occ，存储方式使用在全局Occ上的Mask还是直接存储局部Occ？
 
         # downsample by open3d
+        if torch.isnan(pcd).any() or torch.isinf(pcd).any():
+            print("[Reconstruction] NaN/Inf detected in Model Output! Cleaning...")
+            valid_mask = ~torch.isnan(pcd).any(dim=1) & ~torch.isinf(pcd).any(dim=1)
+            pcd = pcd[valid_mask]
+            pcd_color = pcd_color[valid_mask]
+
         pcd = pcd.cpu().numpy()  # 模型预测出的全局 3D 坐标 [N, H, W, 3]
         pcd_color = pcd_color.cpu().numpy()
         pcd_ocd = o3d.geometry.PointCloud()  # 创建一个 Open3D 的点云对象容器
@@ -185,8 +193,8 @@ class DataGenerator:
         )  # 执行“降采样”，按照voxel_size的大小，把点云分成多个小的体素，每个体素里的点取一个平均值，作为该体素的代表点。
         pcd = np.asarray(pcd_ocd.points)  # [M, 3]， M是降采样后的点云数量
         pcd_color = np.asarray(pcd_ocd.colors)
-        self.pcd_color = pcd_color
-        self.pcd = pcd
+        self.pcd_color = pcd_color 
+        self.pcd = pcd #这是世界坐标系下的点云
         # pcd = torch.from_numpy(np.asarray(pcd_ocd.points)).to(imgs.device)
         # pcd_color = torch.from_numpy(np.asarray(pcd_ocd.colors)).to(imgs.device)
         print(f"downsample the pcd from {pcd_num} to {pcd.shape[0]}")
@@ -372,7 +380,7 @@ class DataGenerator:
                 voxel_index_visible[:, 1],
                 voxel_index_visible[:, 2],
             ] = 1  # 在 3D 掩膜矩阵里，把这些射线经过的地方全部标为 1，也就是看的见的地方
-
+            
             # check if the voxel is occupied
             occ_label_selected = occ_voxels_3d[
                 voxel_index[:, 0], voxel_index[:, 1], voxel_index[:, 2]
@@ -400,6 +408,9 @@ class DataGenerator:
         occ_voxels = voxel2points(
             occ_voxels_3d, free_label=self.free_label
         )  # occ voxel coords (N, 3) 格子索引[[10, 20, 5], [10, 20, 6], ...]
+
+        #那我们直接存 1 - camera_visible_mask_3d 试试呢
+        #camera_visible_mask = 1 - camera_visible_mask_3d
         camera_visible_mask = voxel2points(
             camera_visible_mask_3d, free_label=self.free_label
         )  # 一个巨大的列表 (M, 3)，每个元素都是一个体素的坐标，代表地图上所有被激光“看”到的地方
@@ -499,6 +510,216 @@ class DataGenerator:
         
         return merged_occ_cam, merged_occ_world
 
+    def get_target_poses(self, input_path):
+        """
+        根据 input_path 获取真实的相机轨迹 (GT)。
+        
+        Args:
+            input_path: 文件路径
+            
+        Returns:
+            gt_poses: numpy array of shape (N, 4, 4) 或者 None (如果没有GT)
+        """
+        # 默认返回 None，表示没有 GT 数据，不进行缩放
+        return None
+
+    def compute_trajectory_scale(self, poses_gt, poses_pred):
+        """
+        计算预测轨迹和真实轨迹之间的尺度比例 (GT / Pred)。
+        """
+        def to_mat4x4(p):
+            p = np.array(p)
+            if p.ndim == 1:
+                if p.size == 16: return p.reshape(4, 4)
+                if p.size == 12: return np.vstack([p.reshape(3, 4), [0,0,0,1]])
+            return p
+        try:
+            traj_gt = np.array([to_mat4x4(p)[:3, 3] for p in poses_gt])
+            traj_pred = np.array([to_mat4x4(p)[:3, 3] for p in poses_pred])
+        except Exception as e:
+            print(f"[Scale Error] Data shape mismatch during extraction: {e}")
+            if len(poses_gt) > 0: print(f"  GT pose[0] shape: {np.array(poses_gt[0]).shape}")
+            if len(poses_pred) > 0: print(f"  Pred pose[0] shape: {np.array(poses_pred[0]).shape}")
+            return 1.0
+
+        # 确保帧数一致
+        n_frames = min(len(traj_gt), len(traj_pred))
+        traj_gt = traj_gt[:n_frames]
+        traj_pred = traj_pred[:n_frames]
+
+        if n_frames < 5:
+            print("Warning: Trajectory too short for scale estimation. Using scale=1.0")
+            return 1.0
+
+        # 全局标准差比值 (Sim3 Scale)
+        gt_centered = traj_gt - np.mean(traj_gt, axis=0)
+        pred_centered = traj_pred - np.mean(traj_pred, axis=0)
+        
+        std_gt = np.sqrt(np.mean(np.sum(gt_centered**2, axis=1)))
+        std_pred = np.sqrt(np.mean(np.sum(pred_centered**2, axis=1)))
+        
+        # 防止除以0或nan
+        if std_pred < 1e-6 or np.isnan(std_pred) or np.isnan(std_gt):
+            print(f"[Scale Warning] Invalid std detected (GT:{std_gt}, Pred:{std_pred}). Using scale=1.0")
+            return 1.0
+
+        scale = std_gt / std_pred
+
+        if np.isnan(scale) or np.isinf(scale):
+             print(f"[Scale Warning] Calculated scale is NaN/Inf. Using 1.0")
+             return 1.0
+
+        print(f"[Scale Info] GT std: {std_gt:.4f}, Pred std: {std_pred:.4f} -> Scale: {scale:.4f}")
+        return scale
+ 
+    def align_with_target_scale(self, input_path, pcd):
+        """
+        尝试获取 target 数据，计算尺度并应用修正。
+        依赖 self.get_gt_poses() 的返回值。
+        """
+        scale = 1.0
+        
+        try:
+            # 调用子类的方法获取目标位姿 
+            target_poses_np = self.get_target_poses(input_path)
+            
+            if target_poses_np is None or len(target_poses_np) == 0:
+                print("[Scale Info] No GT poses provided by subclass. Skipping alignment.")
+                return pcd, 1.0
+
+            # 计算尺度： Sim3 思想
+            # self.camera_pose 是模型算的，target_poses_np 是子类给的
+            scale = self.compute_trajectory_scale(target_poses_np, self.camera_pose)
+            
+            # 修正
+            if abs(scale - 1.0) > 1e-4: 
+                print(f"Applying scale correction: {scale:.4f}")
+                
+                # 修正点云
+                pcd = pcd * scale
+                
+                # 修正相机位姿 (只缩放平移部分 t)
+                #self.camera_pose[:, :3, 3] *= scale     
+            return pcd, scale
+        except Exception as e:
+            print(f"[Scale Error] Exception during alignment: {e}")
+            return pcd, 1.0
+    
+    """    
+    def align_with_target_scale_ply(self, input_path, pcd):
+        scale = 1.0
+        
+        try:
+            # 获取 GT 轨迹
+            target_poses_np = self.get_target_poses(input_path)
+            
+            if target_poses_np is None or len(target_poses_np) == 0:
+                print("[Scale Info] No GT poses provided. Skipping alignment.")
+                return pcd, 1.0
+
+            # 计算尺度
+            scale = self.compute_trajectory_scale(target_poses_np, self.camera_pose)
+            
+            #  应用尺度修正 
+            if abs(scale - 1.0) > 1e-4: 
+                print(f"Applying scale correction: {scale:.4f}")
+                pcd = pcd * scale
+                self.camera_pose[:, :3, 3] *= scale
+
+            try:
+                def get_xyz(poses):
+                    poses = np.array(poses)
+                    xyz_list = []
+                    for p in poses:
+                        p = np.array(p)
+                        if p.size == 16: p = p.reshape(4, 4)
+                        elif p.size == 12: p = np.vstack([p.reshape(3, 4), [0,0,0,1]])
+                        if p.shape == (4, 4):
+                            xyz_list.append(p[:3, 3])
+                    return np.array(xyz_list)
+
+                pred_xyz = get_xyz(self.camera_pose) # 已经是 scale 对齐后的
+                gt_xyz = get_xyz(target_poses_np)
+
+                # 对齐长度 (取交集)
+                min_len = min(len(pred_xyz), len(gt_xyz))
+                pred_xyz = pred_xyz[:min_len]
+                gt_xyz = gt_xyz[:min_len]
+
+                if min_len > 1:
+                    # --- 计算点对点误差 (Point-to-Point Error) ---
+                    diff = pred_xyz - gt_xyz
+                    dists = np.linalg.norm(diff, axis=1) # (N,)
+                    
+                    mean_error = np.mean(dists)
+                    rmse_error = np.sqrt(np.mean(dists**2))
+                    max_error = np.max(dists)
+
+                    # --- 计算轨迹总长度与比率 (Path Length & Ratio) ---
+                    # 计算每一步的位移长度
+                    pred_steps = np.linalg.norm(pred_xyz[1:] - pred_xyz[:-1], axis=1)
+                    gt_steps = np.linalg.norm(gt_xyz[1:] - gt_xyz[:-1], axis=1)
+                    
+                    len_pred = np.sum(pred_steps)
+                    len_gt = np.sum(gt_steps)
+                    
+                    # 长度比率 (越接近1越好)
+                    len_ratio = len_pred / (len_gt + 1e-6)
+                    # 长度差异百分比
+                    len_diff_percent = abs(len_pred - len_gt) / (len_gt + 1e-6) * 100
+
+                    print(f"\n====== [Trajectory Evaluation] ======")
+                    print(f"  Frames Aligned : {min_len}")
+                    print(f"  Mean Error     : {mean_error:.4f} m")
+                    print(f"  RMSE           : {rmse_error:.4f} m")
+                    print(f"  Max Error      : {max_error:.4f} m")
+                    print(f"  -----------------------------------")
+                    print(f"  Total Len Pred : {len_pred:.4f} m")
+                    print(f"  Total Len GT   : {len_gt:.4f} m")
+                    print(f"  Length Ratio   : {len_ratio:.4f}  (Pred / GT)")
+                    print(f"  Length Diff    : {len_diff_percent:.2f}%")
+                    print(f"=====================================\n")
+
+                    
+
+                    # --- 保存轨迹 PLY ---
+                    debug_traj_dir = os.path.join("/mnt/data/huangbinling/project/occgen/debug_e4", "debug_traj")
+                    if not os.path.exists(debug_traj_dir):
+                        os.makedirs(debug_traj_dir)
+                    
+                    # 保存预测轨迹 (红色)
+                    pred_colors = np.zeros_like(pred_xyz)
+                    pred_colors[:, 0] = 1.0 # Red
+                    write_ply(pred_xyz, pred_colors, os.path.join(debug_traj_dir, "traj_pred_aligned.ply"))
+                    
+                    # 保存真值轨迹 (绿色)
+                    gt_colors = np.zeros_like(gt_xyz)
+                    gt_colors[:, 1] = 1.0 # Green
+                    write_ply(gt_xyz, gt_colors, os.path.join(debug_traj_dir, "traj_gt.ply"))
+                    
+                    print(f"[Viz] Saved trajectory PLYs to: {debug_traj_dir}")
+
+                    #保存差异到txt
+                    with open(os.path.join(debug_traj_dir, "traj_diff.txt"), "a") as f:
+                        f.write(f"Mean Error: {mean_error:.4f}\n")
+                        f.write(f"RMSE: {rmse_error:.4f}\n")
+                        f.write(f"Max Error: {max_error:.4f}\n")
+                        f.write(f"Length Ratio: {len_ratio:.4f}\n")
+                        f.write(f"Length Diff: {len_diff_percent:.2f}%\n")
+                        f.write(f"Scale: {scale:.4f}\n")
+                        f.write(f"=====================================\n")
+
+            except Exception as e:
+                print(f"[Viz Warning] Failed to save trajectory visualization: {e}")
+                # 不影响主流程，仅打印警告
+            # ===============================================================
+            
+            return pcd, scale
+
+        except Exception as e:
+            print(f"[Scale Error] Exception during alignment: {e}")
+            return pcd, 1.0
+    """   
     def get_io_paths(self, input_path):
         """定义文件路径"""
         # 父类提供一个默认的结构，子类可以改写为复杂的目录结构
@@ -524,82 +745,140 @@ class DataGenerator:
     def save_sequence_data(self, paths, arr_4d_occ, arr_4d_mask):
         """保存序列数据"""
         if 'occ_seq' in paths:
-            np.savez_compressed(paths['occ_seq'], data=arr_4d_occ)
-            print(f"Saved OCC Seq: {arr_4d_occ.shape}")
+            occ_seq_save_start = time.time()
+            #np.savez_compressed(paths['occ_seq'], data=arr_4d_occ)
+            np.save(paths['occ_seq'].replace('.npz', '.npy'), arr_4d_occ)
+            print(f"Saved OCC Seq: {arr_4d_occ.shape} in {time.time() - occ_seq_save_start:.4f}s")
             
         if 'mask_seq' in paths:
-            np.savez_compressed(paths['mask_seq'], data=arr_4d_mask)
-
-    def update_metadata(self, paths, all_camera_poses, all_camera_intrinsics, input_path):
-        """更新 Parquet文件"""
-        pass
+            mask_seq_save_start = time.time()
+            #np.savez_compressed(paths['mask_seq'], data=arr_4d_mask)
+            np.save(paths['mask_seq'].replace('.npz', '.npy'), arr_4d_mask)
+            print(f"Saved Mask Seq: {arr_4d_mask.shape} in {time.time() - mask_seq_save_start:.4f}s")
 
     def compute_sequence_data(self):
         """
-        核心计算循环：生成每一帧的 4D OCC Grid、Mask 以及收集 Pose 和 Intrinsic
-        返回: (arr_4d_occ, arr_4d_mask, all_poses, all_intrinsics)
+        1. OCC: 继续收集稀疏坐标
+        2. Mask: 只在内存里存 Packbits 后的 Mask
         """
-        total_frames = len(self.camera_pose)
-        grid_dims = self.config['occ_size']
+        total_frames = len(self.camera_pose) 
+        grid_dims = self.config['occ_size'] # (H, W, D)
         
-        all_frames_voxels = [] 
-        all_frames_cam_mask_voxels = [] 
+        # OCC 存坐标(稀疏)，Mask 存压缩块(稠密)
+        all_sparse_indices_occ = [] 
+        all_packed_masks = [] 
         all_camera_poses = [] 
         
-        # --- 准备内参 (广播模式) ---
+        # 内参准备 
         current_intrinsic = self.camera_intric_rs
         if hasattr(current_intrinsic, 'detach'): 
             current_intrinsic = current_intrinsic.detach().cpu().numpy()
         current_intrinsic = current_intrinsic.astype(np.float32)
-        
-        # 构造内参列表 (List of Lists)
         intrinsic_rows = [row for row in current_intrinsic]
-        # 使用列表生成式创建独立副本，避免引用问题
         all_camera_intrinsics = [[row.copy() for row in intrinsic_rows] for _ in range(total_frames)]
 
-        # --- 循环每一帧 ---
+        print(f"Processing {total_frames} frames (Simple Packed Mode)...")
+        
         for i in range(total_frames):
             current_pose = self.camera_pose[i]
             
-            # 1. 收集外参
+            # 收集外参
             pose_rows = [row.astype(np.float32) for row in current_pose]
             all_camera_poses.append(pose_rows)
 
-            # 2. 计算可见性 (Ray Casting)
+            # 计算可见性
             occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd, current_pose)
             
             if isinstance(occ_indices, torch.Tensor): occ_indices = occ_indices.detach().cpu().numpy()
             if isinstance(cam_visible_mask, torch.Tensor): cam_visible_mask = cam_visible_mask.detach().cpu().numpy()
 
-            # 3. 生成 OCC Grid (Sparse indices -> Dense Grid)
-            # 过滤越界点
+            # --- OCC ---
             valid_mask_occ = (
                 (occ_indices[:, 0] >= 0) & (occ_indices[:, 0] < grid_dims[0]) &
                 (occ_indices[:, 1] >= 0) & (occ_indices[:, 1] < grid_dims[1]) &
                 (occ_indices[:, 2] >= 0) & (occ_indices[:, 2] < grid_dims[2])
             )
-            valid_voxels_occ = occ_indices[valid_mask_occ].astype(np.int64) 
-            frame_grid_occ = np.zeros(grid_dims, dtype=np.uint8)
-            frame_grid_occ[valid_voxels_occ[:, 0], valid_voxels_occ[:, 1], valid_voxels_occ[:, 2]] = 1
-            all_frames_voxels.append(frame_grid_occ)
+            valid_voxels_occ = occ_indices[valid_mask_occ].astype(np.int16)
+            if len(valid_voxels_occ) > 0:
+                time_col = np.full((len(valid_voxels_occ), 1), i, dtype=np.int16)
+                all_sparse_indices_occ.append(np.hstack([time_col, valid_voxels_occ]))
 
-            # 4. 生成 Mask Grid
+            # --- Mask ---
+            # 过滤越界
             valid_mask_cam = (
                 (cam_visible_mask[:, 0] >= 0) & (cam_visible_mask[:, 0] < grid_dims[0]) &
                 (cam_visible_mask[:, 1] >= 0) & (cam_visible_mask[:, 1] < grid_dims[1]) &
                 (cam_visible_mask[:, 2] >= 0) & (cam_visible_mask[:, 2] < grid_dims[2])
             )
             valid_voxels_cam = cam_visible_mask[valid_mask_cam].astype(np.int64)
-            frame_grid_mask = np.zeros(grid_dims, dtype=np.uint8)
-            frame_grid_mask[valid_voxels_cam[:, 0], valid_voxels_cam[:, 1], valid_voxels_cam[:, 2]] = 1
-            all_frames_cam_mask_voxels.append(frame_grid_mask)
+            
+            # 构建单帧 Bool Grid (瞬间占用64MB)
+            frame_grid = np.zeros(grid_dims, dtype=bool)
+            if len(valid_voxels_cam) > 0:
+                frame_grid[valid_voxels_cam[:, 0], valid_voxels_cam[:, 1], valid_voxels_cam[:, 2]] = True
+            
+            # 压缩 
+            all_packed_masks.append(np.packbits(frame_grid))
+            
+            if i % 50 == 0: print(f"  Frame {i}/{total_frames} packed.")
 
-        # 堆叠成 4D 数组 (T, H, W, D)
-        arr_4d_occ = np.stack(all_frames_voxels, axis=0)
-        arr_4d_mask = np.stack(all_frames_cam_mask_voxels, axis=0)
+        # --- 合并 ---
+        final_occ = np.vstack(all_sparse_indices_occ) if all_sparse_indices_occ else np.zeros((0,4), dtype=np.int16)
+        
+        # 将列表堆叠成一个 numpy 数组 (N, PackedSize) 
+        final_mask_packed = np.stack(all_packed_masks)
 
-        return arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics
-    
+        return final_occ, final_mask_packed, all_camera_poses, all_camera_intrinsics
+
+    def save_sequence_data(self, paths, sparse_occ_indices, packed_mask_data):
+        """
+        OCC -> 存 CSR
+        Mask -> 存 Packed Array 
+        """
+        import scipy.sparse as sparse
+
+        N = len(self.camera_pose)
+        grid_size = self.config['occ_size']
+        H, W, D = grid_size
+        flat_dim = H * W * D
+
+        # --- 保存 OCC ---
+        if 'occ_seq' in paths:
+            t_start = time.time()
+            if len(sparse_occ_indices) == 0:
+                sparse_mat = sparse.csr_matrix((N, flat_dim), dtype=np.uint8)
+            else:
+                times = sparse_occ_indices[:, 0]
+                xs, ys, zs = sparse_occ_indices[:, 1], sparse_occ_indices[:, 2], sparse_occ_indices[:, 3]
+                flat_indices = xs.astype(np.int64) * (W * D) + ys.astype(np.int64) * D + zs.astype(np.int64)
+                data = np.ones(len(flat_indices), dtype=np.uint8)
+                sparse_mat = sparse.csr_matrix((data, (times, flat_indices)), shape=(N, flat_dim))
+            
+            sparse.save_npz(paths['occ_seq'], sparse_mat)
+            print(f"Saved OCC in {time.time() - t_start:.2f}s")
+
+        # --- Mask ---
+        if 'mask_seq' in paths:
+            t_start = time.time()
+            # packed_mask_data 已经在 compute 里变成 (N, PackedLen) 的 uint8 数组了
+            np.savez_compressed(
+                paths['mask_seq'], 
+                data=packed_mask_data, 
+                shape=grid_size, 
+                mode='packed'
+            )
+            print(f"Saved Mask in {time.time() - t_start:.2f}s")
+
+    def update_metadata(self, paths, all_camera_poses, all_camera_intrinsics, input_path):
+        """更新 Parquet文件"""
+        pass
+
+    def update_meta_episodes_jsonl(self, scale):
+        """
+        更新 meta/episodes.jsonl 中的 scale 字段
+        """
+        pass
+
     # 单帧版本的occ_pipline      
     def occ_gen_pipeline(self, input_path, pcd_save=False):
         """
@@ -613,7 +892,7 @@ class DataGenerator:
             dtype=np.float32,
         )  # 临时的， 实际应该根据input_path读出来
         # get the pcd with camera pose 三维重建，得到点云以及相机姿态轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
             input_path, pcd_save
         )  # 点云pcd是世界坐标系下的点云，相机姿态轨迹self.camera_pose是世界坐标系下的相机姿态轨迹，norm_cam_ray是相机在相机坐标系下的单位射线方向
         # generate the occ map
@@ -622,7 +901,7 @@ class DataGenerator:
         )  # 目前在世界坐标系下, 且仍属于点云状态，只不过是进行了下采样，每个格子只有一个点，但是无label
         occ_voxels_visual_0, visual_mask_0 = self.check_visual_occ(
             self.occ_pcd, self.camera_pose[0]
-        )  # 检查occ在相机0下是否可见
+        )  # 检查occ在相机0下是否可见，可见且有障碍物就是1
         if pcd_save:  # save the occ map
             save_path = input_path.split("videos/")[
                 0
@@ -659,7 +938,7 @@ class DataGenerator:
     def occ_gen_all_pipeline(self, input_path, pcd_save=False):
  
         # 1. 重建全局地图和轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
             input_path, pcd_save
         )
 
@@ -919,7 +1198,7 @@ class DataGenerator:
             )
 
         # 2. 重建全局地图和轨迹
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
             input_path, pcd_save
         )
 
@@ -1128,15 +1407,25 @@ class DataGenerator:
     #解耦后的最终run_pipeline
     def run_pipeline(self, input_path, pcd_save=True):
         """
-        重建 -> 路径 -> 存全局 -> 算序列 -> 存序列 -> 更新元数据
+        重建 -> 对齐GT尺度 -> 存全局 -> 算序列 -> 存序列 -> 更新元数据
         """
         # 初始化
         if self.camera_intric is None:
             self.camera_intric = np.array([[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32)
 
         # 三维重建 
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstuction(input_path, pcd_save)
-        self.occ_pcd = self.pcd_to_occ(pcd)
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path, pcd_save) #这是世界坐标系下的吗？
+        
+        # 对齐GT尺度
+        pcd, scale = self.align_with_target_scale(input_path, pcd) # self.camera_pose已经是scale对齐后的相机位姿 pcd也是对齐过
+        print(f"[Scale Info] Aligned with target scale: {scale:.4f}")
+
+        self.update_meta_episodes_jsonl(scale)
+
+        #self.pcd = pcd 不做scale对齐，保持原始尺度
+        
+        # 转换为occ
+        self.occ_pcd = self.pcd_to_occ(self.pcd)
 
         if not pcd_save: return
 
@@ -1149,8 +1438,7 @@ class DataGenerator:
         self.save_global_data(paths)
 
         # 执行核心计算
-        arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = self.compute_sequence_data()
-
+        arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = self.compute_sequence_data() 
         # 保存序列数据
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)

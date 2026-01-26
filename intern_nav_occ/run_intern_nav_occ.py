@@ -1,4 +1,10 @@
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import sys
 import numpy as np
 import traceback
@@ -16,10 +22,10 @@ def run_dataset_pipeline():
     # ================= 1. 配置参数 =================
     
     # 数据集根目录 
-    dataset_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/" 
+    dataset_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_4/traj_data/" 
     
     # 输出结果的根目录
-    output_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_split_e2/traj_data/"
+    output_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_4/traj_data/"
     
     # 模型 Checkpoint 路径
     model_dir = os.path.join(project_root, "ckpt")
@@ -104,6 +110,8 @@ def run_dataset_pipeline():
             continue
 
 if __name__ == "__main__":
+    import faulthandler
+    faulthandler.enable()
     # 设置 GPU (如果有多卡)
     os.environ["CUDA_VISIBLE_DEVICES"] = "2"
     
