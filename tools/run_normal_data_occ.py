@@ -14,13 +14,13 @@ def run_normal_data_pipeline():
     # ================= 1. 配置参数 =================
     
     # 数据集根目录 
-    input_path = "/mnt/data_ssd/yenianjin/project/Pi3/vis/real_0112_2/videos" 
+    input_path = "/mnt/data/huangbinling/project/occgen/inputs/" 
 
     # 视频文件名
     video_name = "office.mp4"
     
     # 输出结果的根目录
-    save_dir = "/mnt/data_ssd/yenianjin/project/Pi3/vis/real_0112_2/videos/outputs"
+    save_dir = "/mnt/data/huangbinling/project/occgen/outputs/"
     
     # 模型 Checkpoint 路径
     model_dir = os.path.join(project_root, "ckpt")
@@ -33,7 +33,7 @@ def run_normal_data_pipeline():
     generator = DataGenerator(config_path, save_dir, model_dir)
     
     # ================= 3. 开始处理 =================
-    generator.occ_gen_all_pipeline(os.path.join(input_path, video_name), pcd_save=True)
+    generator.run_pipeline(os.path.join(input_path, video_name), pcd_save=True)
 
 if __name__ == "__main__":
     run_normal_data_pipeline()

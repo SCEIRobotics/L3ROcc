@@ -17,11 +17,9 @@ import pandas as pd
 
 
 # from pi3.utils.geometry import homogenize_points
-from pi3.utils.geometry import depth_edge
-from pi3.models.pi3 import Pi3
-from pi3.utils.basic import (
-    load_images_as_tensor,
-    load_depths_as_tensor,
+from third_party.pi3.pi3.utils.geometry import depth_edge
+from third_party.pi3.pi3.models.pi3 import Pi3
+from third_party.pi3.pi3.utils.basic import (
     write_ply,
 )  # Assuming you have a helper function
 from occ.utils import (
@@ -35,7 +33,8 @@ from occ.utils import (
     voxels_to_pcd,
     voxel2points,
     point_transform_2d_batch,
-    estimate_intrinsics
+    estimate_intrinsics,
+    load_images_as_tensor
 )
 
  
@@ -342,7 +341,7 @@ class DataGenerator:
             self.config["occ_size"]
         ).cuda()  # 地图的天花板（最大索引）
         zeros_3 = torch.zeros_like(occ_voxels_shape)  # 地板（全是0）
-        ray_traverse_start = time.time()
+        #ray_traverse_start = time.time()
         for step in range(
             int(max_distance / ray_cast_step_size) + 1
         ):  # 在voxels坐标系下算
@@ -399,9 +398,9 @@ class DataGenerator:
 
             # record the ray that hit the occupied voxel
             not_hit_ray[ray_selected_index] = False  # 把这些撞墙射线的状态改为 False
-        ray_traverse_end = time.time()
-        print(f"ray traverse cost: {ray_traverse_end - ray_traverse_start}s")
-        print("valid occ number: ", occ_voxels_3d.sum())
+        #ray_traverse_end = time.time()
+        #print(f"ray traverse cost: {ray_traverse_end - ray_traverse_start}s")
+        #print("valid occ number: ", occ_voxels_3d.sum())
         occ_voxels_3d = (
             occ_voxels_3d * camera_visible_mask_3d
         )  # 只有既有墙、又能被看见的地方是 1
@@ -778,7 +777,7 @@ class DataGenerator:
         all_camera_intrinsics = [[row.copy() for row in intrinsic_rows] for _ in range(total_frames)]
 
         print(f"Processing {total_frames} frames (Simple Packed Mode)...")
-        
+        occ_start = time.time()
         for i in range(total_frames):
             current_pose = self.camera_pose[i]
             
@@ -821,7 +820,8 @@ class DataGenerator:
             all_packed_masks.append(np.packbits(frame_grid))
             
             if i % 50 == 0: print(f"  Frame {i}/{total_frames} packed.")
-
+        occ_end = time.time()
+        print(f"occ gen cost: {occ_end - occ_start}s")
         # --- 合并 ---
         final_occ = np.vstack(all_sparse_indices_occ) if all_sparse_indices_occ else np.zeros((0,4), dtype=np.int16)
         
@@ -934,8 +934,8 @@ class DataGenerator:
                 occ_pcd_visual_0,
             )
 
-    # 可视化版本的occ_pipline      
-    def occ_gen_all_pipeline(self, input_path, pcd_save=False):
+    # 可视化版本的历史帧叠加occ_pipline      
+    def run_pipeline(self, input_path, pcd_save=False):
  
         # 1. 重建全局地图和轨迹
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
@@ -950,55 +950,57 @@ class DataGenerator:
             print("Start processing sequence frames...")
 
             # --- 1. 创建混合显示 的文件夹 ---
-            ply_dir = os.path.join(
-                self.save_path, "ply_sequence"
+            merge_cam_ply_dir = os.path.join(
+                self.save_path, "merge_ply_sequence_cam"
             )  # 存相机坐标系下混合PLY
-            if not os.path.exists(ply_dir):
-                os.makedirs(ply_dir)
+            if not os.path.exists(merge_cam_ply_dir):
+                os.makedirs(merge_cam_ply_dir)
 
-            npy_dir = os.path.join(
-                self.save_path, "npy_sequence"
+            merge_cam_npy_dir = os.path.join(
+                self.save_path, "merge_npy_sequence_cam"
             )  # 存相机坐标系下混合NPY
-            if not os.path.exists(npy_dir):
-                os.makedirs(npy_dir)
+            if not os.path.exists(merge_cam_npy_dir):
+                os.makedirs(merge_cam_npy_dir)
 
-            ply_world_dir = os.path.join(
-                self.save_path, "ply_sequence_world"
+            merge_world_ply_dir = os.path.join(
+                self.save_path, "merge_ply_sequence_world"
             )  # 存世界坐标系下混合PLY
-            if not os.path.exists(ply_world_dir):
-                os.makedirs(ply_world_dir)
+            if not os.path.exists(merge_world_ply_dir):
+                os.makedirs(merge_world_ply_dir)
 
-            npy_world_dir = os.path.join(
-                self.save_path, "npy_sequence_world"
+            merge_world_npy_dir = os.path.join(
+                self.save_path, "merge_npy_sequence_world"
             )  # 存世界坐标系下混合NPY
-            if not os.path.exists(npy_world_dir):
-                os.makedirs(npy_world_dir)
+            if not os.path.exists(merge_world_npy_dir):
+                os.makedirs(merge_world_npy_dir)
 
             # --- 2. 创建【单独 Occ】的文件夹  ---
-            occ_ply_dir = os.path.join(self.save_path, "occ_only_ply")  # 存纯Occ PLY
-            if not os.path.exists(occ_ply_dir):
-                os.makedirs(occ_ply_dir)
+            occ_only_cam_ply_dir = os.path.join(self.save_path, "occ_only_cam_ply")  # 存纯Occ PLY
+            if not os.path.exists(occ_only_cam_ply_dir):
+                os.makedirs(occ_only_cam_ply_dir)
 
-            occ_npy_dir = os.path.join(self.save_path, "occ_only_npy")  # 存纯Occ NPY
-            if not os.path.exists(occ_npy_dir):
-                os.makedirs(occ_npy_dir)
+            occ_only_cam_npy_dir = os.path.join(self.save_path, "occ_only_cam_npy")  # 存纯Occ NPY
+            if not os.path.exists(occ_only_cam_npy_dir):
+                os.makedirs(occ_only_cam_npy_dir)
 
             total_frames = len(self.camera_pose)
             occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
                 self.occ_pcd, self.camera_pose[0]
             )  # 把世界坐标系下的occ转换到相机坐标系下
             write_ply(
-                occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
+                occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "all_occ_cam.ply")
             )  # 最后一维是颜色 是没有进行mask的，所有点都在相机视野内，一个全局地图
 
             #每次跑新视频前，清空历史缓冲区
             self.occ_history_buffer.clear()
+            occ_start = time.time()
             for i in range(total_frames):
                 current_pose = self.camera_pose[i]
 
                 # ================= A. 计算数据 =================
 
                 #  计算当前帧可见 Occ (核心数据)
+                
                 occ_indices, _ = self.check_visual_occ(self.occ_pcd, current_pose)
                 single_frame_occ_cam = voxels_to_pcd(
                     occ_indices, self.voxel_size, self.pc_range
@@ -1052,7 +1054,7 @@ class DataGenerator:
                     write_ply(
                         local_occ_cam,
                         pure_occ_color,
-                        os.path.join(occ_ply_dir, f"occ_{i:04d}.ply"),
+                        os.path.join(occ_only_cam_ply_dir, f"occ_{i:04d}.ply"),
                     )
                 else:
                     # 如果这帧没有occ，保存一个空文件或者跳过
@@ -1066,7 +1068,7 @@ class DataGenerator:
                         [local_occ_cam, np.full((local_occ_cam.shape[0], 1), 2)], axis=1
                     )
                     np.save(
-                        os.path.join(occ_npy_dir, f"occ_{i:04d}.npy"),
+                        os.path.join(occ_only_cam_npy_dir, f"occ_{i:04d}.npy"),
                         occ_npy_single.astype(np.float32),
                     )
                 else:
@@ -1101,7 +1103,7 @@ class DataGenerator:
                 write_ply(
                     final_points,
                     final_colors,
-                    os.path.join(ply_dir, f"frame_{i:04d}.ply"),
+                    os.path.join(merge_cam_ply_dir, f"frame_{i:04d}_cam.ply"),
                 )
 
                 # 保存混合 NPY (带标签)
@@ -1121,7 +1123,7 @@ class DataGenerator:
                     final_npy_data = np.concatenate([bg_npy, traj_npy], axis=0)
 
                 np.save(
-                    os.path.join(npy_dir, f"frame_{i:04d}.npy"),
+                    os.path.join(merge_cam_npy_dir, f"frame_{i:04d}_cam.npy"),
                     final_npy_data.astype(np.float32),
                 )
 
@@ -1172,7 +1174,7 @@ class DataGenerator:
 
                 # 保存为 (N, 7) 的 NPY
                 np.save(
-                    os.path.join(npy_world_dir, f"frame_{i:04d}_world.npy"),
+                    os.path.join(merge_world_npy_dir, f"frame_{i:04d}_world.npy"),
                     final_npy_data.astype(np.float32),
                 )
 
@@ -1182,53 +1184,14 @@ class DataGenerator:
                 write_ply(
                     final_npy_data[:, :3],
                     final_npy_data[:, 3:6],
-                    os.path.join(ply_world_dir, f"frame_{i:04d}_world.ply"),
+                    os.path.join(merge_world_ply_dir, f"frame_{i:04d}_world.ply"),
                 )
 
                 if i % 10 == 0:
                     print(f"Processed frame {i}/{total_frames}")
-    
-    #解耦后的最终run_pipeline
-    def run_pipeline(self, input_path, pcd_save=True):
-        """
-        重建 -> 对齐GT尺度 -> 存全局 -> 算序列 -> 存序列 -> 更新元数据
-        """
-        # 初始化
-        if self.camera_intric is None:
-            self.camera_intric = np.array([[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32)
+            occ_end = time.time()
+            print(f"occ gen and save cost: {occ_end - occ_start}s")
 
-        # 三维重建 
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path, pcd_save) #这是世界坐标系下的吗？
-        
-        # 对齐GT尺度
-        pcd, scale = self.align_with_target_scale(input_path, pcd) # self.camera_pose已经是scale对齐后的相机位姿 pcd也是对齐过
-        print(f"[Scale Info] Aligned with target scale: {scale:.4f}")
-
-        self.update_meta_episodes_jsonl(scale)
-
-        #self.pcd = pcd 不做scale对齐，保持原始尺度
-        
-        # 转换为occ
-        self.occ_pcd = self.pcd_to_occ(self.pcd)
-
-        if not pcd_save: return
-
-        print("Start processing sequence frames...")
-        
-        # 获取路径
-        paths = self.get_io_paths(input_path)
-        
-        # 保存全局数据
-        self.save_global_data(paths)
-
-        # 执行核心计算
-        arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = self.compute_sequence_data() 
-        # 保存序列数据
-        print("Saving 4D Sequence Arrays...")
-        self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
-
-        #  更新元数据
-        self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
 
 # ================= 主函数 =================
 
@@ -1257,5 +1220,5 @@ if __name__=="__main__":
     input_path = "/mnt/data_ssd/yenianjin/project/Pi3/vis/real_0112_2/videos"
     video_name = "office.mp4"
     generator = DataGenerator(config_path, save_dir, model_dir)
-    generator.occ_gen_pipeline(os.path.join(input_path, video_name), pcd_save=True)
+    generator.run_pipeline(os.path.join(input_path, video_name), pcd_save=True)
  

@@ -25,6 +25,7 @@ ckpts
 *_check/
 /utils/utils_ceph.py
 /inputs
+/outputs
 /traj_data
 /e1
 /e2
@@ -46,7 +47,8 @@ ckpts
 /debug_seg_fault
 /utils/benchmark
 /utils/calc
-/utils/vis
 /all_outputs
 resize_demo_imgs.py
 img_dir_to_video.py
+demo_gradio.py
+example.py

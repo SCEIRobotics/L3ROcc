@@ -13,15 +13,14 @@ import json
 import fcntl
 
 # from pi3.utils.geometry import homogenize_points
-from pi3.utils.geometry import depth_edge
-from pi3.models.pi3 import Pi3
-from pi3.utils.basic import (
+from third_party.pi3.pi3.utils.geometry import depth_edge
+from third_party.pi3.pi3.models.pi3 import Pi3
+from third_party.pi3.pi3.utils.basic import (
     load_images_as_tensor,
-    load_depths_as_tensor,
     write_ply,
 )
 
-from occ.dataset.vln_env import DataGenerator
+from occ.base import DataGenerator
 
 
 class InternNavDataGenerator(DataGenerator):
@@ -260,7 +259,48 @@ class InternNavDataGenerator(DataGenerator):
             except Exception as e:
                 print(f"Error updating {file_path}: {e}")
                 break
+    
+    def run_pipeline(self, input_path, pcd_save=True):
+        """
+        重建 -> 对齐GT尺度 -> 存全局 -> 算序列 -> 存序列 -> 更新元数据
+        """
+        # 初始化
+        if self.camera_intric is None:
+            self.camera_intric = np.array([[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32)
 
+        # 三维重建 
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path, pcd_save) #这是世界坐标系下的吗？
+        
+        # 对齐GT尺度
+        pcd, scale = self.align_with_target_scale(input_path, pcd) # self.camera_pose已经是scale对齐后的相机位姿 pcd也是对齐过
+        print(f"[Scale Info] Aligned with target scale: {scale:.4f}")
+
+        self.update_meta_episodes_jsonl(scale)
+
+        #self.pcd = pcd 不做scale对齐，保持原始尺度
+        
+        # 转换为occ
+        self.occ_pcd = self.pcd_to_occ(self.pcd)
+
+        if not pcd_save: return
+
+        print("Start processing sequence frames...")
+        
+        # 获取路径
+        paths = self.get_io_paths(input_path)
+        
+        # 保存全局数据
+        self.save_global_data(paths)
+
+        # 执行核心计算
+        arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = self.compute_sequence_data() 
+        # 保存序列数据
+        print("Saving 4D Sequence Arrays...")
+        self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
+
+        #  更新元数据
+        self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
+        
 # ================= 主函数 =================
 
 if __name__ == "__main__":

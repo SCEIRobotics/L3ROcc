@@ -21,16 +21,16 @@ def run_dataset_pipeline():
     # ================= 1. 配置参数 =================
     
     # 数据集根目录 
-    dataset_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_4/traj_data/" 
+    dataset_root = "/mnt/data/huangbinling/project/occgen/all_outputs/debug/debug_seg_fault/traj_data/" 
     
     # 输出结果的根目录
-    output_root = "/mnt/data/huangbinling/project/occgen/small_vln_n1_4/traj_data/"
+    output_root = "/mnt/data/huangbinling/project/occgen/all_outputs/debug/debug_seg_fault/traj_data/"
     
     # 模型 Checkpoint 路径
     model_dir = os.path.join(project_root, "ckpt")
     
     # 配置文件路径
-    config_path = os.path.join(project_root, "occ", "config.yaml")
+    config_path = os.path.join(project_root, "occ","configs", "config.yaml")
     
     # ================= 2. 初始化 =================
     
