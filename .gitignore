@@ -48,6 +48,7 @@ ckpts
 /utils/benchmark
 /utils/calc
 /all_outputs
+/examples
 resize_demo_imgs.py
 img_dir_to_video.py
 demo_gradio.py
