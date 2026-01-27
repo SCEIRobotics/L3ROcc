@@ -1,13 +1,16 @@
-import sys, os
-import yaml
-import numpy as np
-import mayavi.mlab as mlab
-import cv2
 import glob
+import os
 import re
+import sys
 from argparse import ArgumentParser
 
-# 这个代码用于将世界坐标系下含有初始点云、OCC、相机轨迹的npy文件转换成视频
+import cv2
+import mayavi.mlab as mlab
+import numpy as np
+import yaml
+
+# This script generates a video from .npy files containing the initial point cloud,
+# Occupancy (OCC), and camera trajectory in the world coordinate system.
 
 
 def numerical_sort(value):
@@ -21,17 +24,18 @@ if __name__ == "__main__":
     mlab.options.offscreen = True
 
     parse = ArgumentParser()
-    # 指向 npy_sequence_world (里面现在应该是 N x 7 的数据)
+    # Path to 'npy_sequence_world' directory (Expected data shape: N x 7)
     parse.add_argument(
         "--input_dir",
         type=str,
         default="/Users/huangbinling/Documents/trae_projects/occgen/occgen/outputs/office_1/npy_sequence_world",
     )
+    # Output path (Rename to prevent overwriting existing files)
     parse.add_argument(
         "--output_video",
         type=str,
         default="/Users/huangbinling/Documents/trae_projects/occgen/occgen/outputs/office_1/real_color_world.mp4",
-    )  # 改个名防止覆盖
+    )
     parse.add_argument(
         "--config",
         type=str,
@@ -75,62 +79,62 @@ if __name__ == "__main__":
             )
             continue
 
-        # 1. 拆分数据
-        # Label 在第 6 列 (index 6)
+        # 1. Data Splitting
+        # The label is located in the 6th column (index 6)
         mask_bg = data[:, 6] == 0
         mask_traj = data[:, 6] == 1
         mask_occ = data[:, 6] == 2
 
-        # 背景数据: XYZ 和 RGB
+        # Background data: XYZ coordinates and RGB color
         bg_xyz = data[mask_bg, :3]
         bg_rgb = data[mask_bg, 3:6]  # R, G, B in [0, 1]
 
         pts_traj = data[mask_traj, :3]
         pts_occ = data[mask_occ, :3]
 
-        # 2. 绘制背景 (支持真彩色!)
+        # 2. Render Background (Supports True Color)
         if len(bg_xyz) > 0:
             N = len(bg_xyz)
-            # 创建 0 到 N-1 的索引作为 scalar
+            # Create scalar indices from 0 to N-1
             scalars = np.arange(N)
 
-            # 绘制点，模式为 2dvertex
+            # Render points using '2dvertex' mode
             pts = mlab.points3d(
                 bg_xyz[:, 0],
                 bg_xyz[:, 1],
                 bg_xyz[:, 2],
-                scalars,  # 传入索引
+                scalars,  # Pass indices
                 mode="2dvertex",
-                scale_factor=0.03,  # 仅占位
+                scale_factor=0.03,  # Placeholder scale
             )
-            # 必须是 (N, 4) 的 uint8，包含 Alpha 通道
+            # Create a Lookup Table (LUT) of shape (N, 4) uint8, including the Alpha channel
             lut = np.zeros((N, 4), dtype=np.uint8)
-            lut[:, :3] = (bg_rgb * 255).astype(np.uint8)  # 填入 RGB
-            lut[:, 3] = 255  # Alpha = 255 (不透明)
+            lut[:, :3] = (bg_rgb * 255).astype(np.uint8)  # Fill RGB values
+            lut[:, 3] = 255  # Alpha = 255 (Opaque)
 
-            # 将这个 LUT 强制赋值给 Mayavi 对象
+            # Force assignment of this custom LUT to the Mayavi object
             pts.module_manager.scalar_lut_manager.lut.number_of_colors = N
             pts.module_manager.scalar_lut_manager.lut.table = lut
 
-            # 关闭自动缩放，防止颜色错位
+            # Disable auto-scaling to prevent color misalignment
             pts.glyph.scale_mode = "scale_by_vector"
 
-        # 3. 绘制 OCC (Label 2) -> 深灰色方块
+        # 3. Render OCC (Label 2) -> Dark Gray Cubes
         if len(pts_occ) > 0:
             occ_plot = mlab.points3d(
                 pts_occ[:, 0],
                 pts_occ[:, 1],
                 pts_occ[:, 2],
                 mode="cube",
-                color=(0.4, 0.4, 0.4),  # 深灰
+                color=(0.4, 0.4, 0.4),  # Dark gray
                 scale_factor=voxel_size - 0.005,
                 opacity=1.0,
             )
             occ_plot.glyph.scale_mode = "data_scaling_off"
 
-        # 4. 绘制轨迹 (Label 1) -> 蓝线 + 红头 (已修改大小)
+        # 4. Render Trajectory (Label 1) -> Blue Path + Red Head
         if len(pts_traj) > 0:
-            # 历史轨迹
+            # Historical trajectory
             if len(pts_traj) > 1:
                 hist_traj = pts_traj[:-1]
                 mlab.points3d(
@@ -138,24 +142,23 @@ if __name__ == "__main__":
                     hist_traj[:, 1],
                     hist_traj[:, 2],
                     mode="sphere",
-                    color=(0.0, 0.0, 1.0),  # 纯蓝
-                    # 【修改点】从 0.15 改为 0.05，缩小3倍
+                    color=(0.0, 0.0, 1.0),  # Pure blue
                     scale_factor=0.025,
                 )
 
-            # 当前车头
+            # Current agent position (Head)
             curr_pos = pts_traj[-1]
             mlab.points3d(
                 curr_pos[0],
                 curr_pos[1],
                 curr_pos[2],
                 mode="sphere",
-                color=(1.0, 0.0, 0.0),  # 纯红
-                # 【修改点】从 0.3 改为 0.1，缩小3倍
+                color=(1.0, 0.0, 0.0),  # Pure red
                 scale_factor=0.05,
             )
 
-        # 5. 设置相机 通过visual.py获取想要的视角参数
+        # 5. Camera Configuration
+        # Note: View parameters are obtained via visual_sample_frame.py
         # -------------------------------------------------
         cam = figure.scene.camera
         cam.position = [-5.682662716850507, -2.3581944446045062, 1.1414235902534458]
@@ -176,4 +179,4 @@ if __name__ == "__main__":
 
     writer.release()
     mlab.close(all=True)
-    print(f"✅ Real-Color Fused Video saved to: {output_video}")
+    print(f"Real-Color Fused Video saved to: {output_video}")

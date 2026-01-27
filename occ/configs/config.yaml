@@ -1,6 +1,6 @@
 'depth': 10
 'min_density': 0.1
-'n_threads': -1
+'n_threads': 1
 'downsample': False
 'voxel_size': 0.02
 'max_nn': 20

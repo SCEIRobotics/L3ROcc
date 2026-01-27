@@ -1,39 +1,62 @@
-import os 
-import sys 
-import numpy as np
+import os
+import sys
 import traceback
-from occ.base import DataGenerator
-sys.path.append('.') 
 
+import numpy as np
+
+# Add the project root directory to sys.path to ensure local modules can be imported correctly.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
+sys.path.append(".")
 sys.path.append(project_root)
+
+from occ.base import DataGenerator
+from occ.generater.normal_data_vln_env import SimpleVideoDataGenerator
 
 
 def run_normal_data_pipeline():
-    # ================= 1. 配置参数 =================
-    
-    # 数据集根目录 
-    input_path = "/mnt/data/huangbinling/project/occgen/inputs/" 
+    """
+    Main function to execute the data generation pipeline for a single video.
+    This sets up the configuration paths and triggers the generator.
+    """
 
-    # 视频文件名
+    # ================= 1. Configuration Parameters  =================
+
+    # Root directory for input data
+    input_path = "/mnt/data/huangbinling/project/occgen/inputs/"
+
+    # Target video filename to process
     video_name = "office.mp4"
-    
-    # 输出结果的根目录
-    save_dir = "/mnt/data/huangbinling/project/occgen/outputs/"
-    
-    # 模型 Checkpoint 路径
-    model_dir = os.path.join(project_root, "ckpt")
-    
-    # 配置文件路径
-    config_path = os.path.join(project_root, "occ","configs", "config.yaml")
 
-    
-    # ================= 2. 初始化 =================
-    generator = DataGenerator(config_path, save_dir, model_dir)
-    
-    # ================= 3. 开始处理 =================
-    generator.run_pipeline(os.path.join(input_path, video_name), pcd_save=True)
+    # Root directory where the processed output will be saved
+    save_dir = "/mnt/data/huangbinling/project/occgen/outputs/my_custom_dataset"
+
+    # Directory containing pre-trained model checkpoints
+    model_dir = os.path.join(project_root, "ckpt")
+
+    # Path to the configuration file (YAML)
+    config_path = os.path.join(project_root, "occ", "configs", "config.yaml")
+
+    # ================= 2. Initialization  =================
+    print(f"Initializing SimpleVideoDataGenerator with config: {config_path}")
+    generator = SimpleVideoDataGenerator(config_path, save_dir, model_dir)
+
+    # ================= 3. Execution  =================
+    full_video_path = os.path.join(input_path, video_name)
+
+    # [Option 1] visual_pipeline:
+    # Generates files required specifically for visualization purposes.
+    # generator.visual_pipeline(full_video_path, pcd_save=True)
+
+    # [Option 2] run_pipeline:
+    # Generates files required for the LeRobot format and standard dataset structure.
+    generator.run_pipeline(full_video_path, pcd_save=True)
+
 
 if __name__ == "__main__":
+    # Set environment variables to limit thread usage for numerical libraries.
+    # This prevents CPU oversubscription when running multiple processes or heavy computations.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+
     run_normal_data_pipeline()

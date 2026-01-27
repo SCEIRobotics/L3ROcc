@@ -1,15 +1,17 @@
-import sys, os
-import yaml
-import numpy as np
-import mayavi.mlab as mlab
-import cv2
 import glob
+import os
 import re
+import sys
 from argparse import ArgumentParser
 
-# 这个代码用于将occ_only.npy转换成视频
+import cv2
+import mayavi.mlab as mlab
+import numpy as np
+import yaml
 
-# 添加路径
+# This script converts a sequence of occ_only_cam.npy files into a video.
+
+# Append necessary system paths
 sys.path.append(".")
 sys.path.append("..")
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -17,12 +19,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 def create_low_sat_gradient():
     """
-    创建一个从 '近处颜色' 到 '远处颜色' 的 256 色低饱和度渐变表
+    Creates a 256-color low-saturation gradient lookup table (LUT)
+    transitioning from a 'near' color to a 'far' color.
     """
-    # 1. 定义颜色 (RGB 0-1) - 莫兰迪色系
-    # 近处 (Near): 柔和的雾霾白
+    # 1. Define colors (RGB 0-1) - Morandi palette
+    # Near: Soft hazy white
     color_near = np.array([0.85, 0.83, 0.80, 1.0])
-    # 远处 (Far): 深邃的灰蓝色
+    # Far: Deep grey-blue
     color_far = np.array([0.25, 0.30, 0.35, 1.0])
 
     n_bins = 256
@@ -39,7 +42,7 @@ LOW_SAT_LUT = create_low_sat_gradient()
 # ==========================================
 
 
-# 文件排序
+# Numerical sorting helper
 def numerical_sort(value):
     numbers = re.compile(r"(\d+)")
     parts = numbers.split(value)
@@ -47,7 +50,7 @@ def numerical_sort(value):
     return parts
 
 
-# 数据转换
+# Convert voxel grid to point cloud coordinates
 def voxel2points(pred_occ, mask_camera=None, free_label=0):
     x = np.linspace(0, pred_occ.shape[0] - 1, pred_occ.shape[0])
     y = np.linspace(0, pred_occ.shape[1] - 1, pred_occ.shape[1])
@@ -102,7 +105,7 @@ if __name__ == "__main__":
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_video, fourcc, 30.0, (width, height))
 
-    # 相机位置 (用于计算距离)
+    # Camera position constant (used for distance calculation)
     CAM_POS_ARRAY = np.array(
         [-0.2231539051005686, -0.7217984195639319, -3.1510481045664047]
     )
@@ -131,14 +134,14 @@ if __name__ == "__main__":
 
         # fov_voxels[:, 0] = -fov_voxels[:, 0]
 
-        # 1. 计算距离 (用于颜色)
+        # 1. Compute distance (used for coloring)
         dist_values = np.sqrt(
             (fov_voxels[:, 0] - CAM_POS_ARRAY[0]) ** 2
             + (fov_voxels[:, 1] - CAM_POS_ARRAY[1]) ** 2
             + (fov_voxels[:, 2] - CAM_POS_ARRAY[2]) ** 2
         )
 
-        # 2. 绘制点云
+        # 2. Render point cloud
         plt_plot_fov = mlab.points3d(
             fov_voxels[:, 0],
             fov_voxels[:, 1],
@@ -149,14 +152,14 @@ if __name__ == "__main__":
             opacity=1.0,
         )
 
-        # 【!!! 关键修复 !!!】
-        # 强制关闭数据缩放，让所有方块保持一样大
+        # [CRITICAL FIX]
+        # Force disable data scaling to ensure all voxels remain uniform in size
         plt_plot_fov.glyph.scale_mode = "data_scaling_off"
 
-        # 应用自定义颜色表
+        # Apply custom color lookup table (LUT)
         plt_plot_fov.module_manager.scalar_lut_manager.lut.table = LOW_SAT_LUT
 
-        # 3. 设置相机 通过visual.py去获取第一帧最想要的视角参数
+        # 3. Setup camera: Optimal viewpoint parameters obtained from visual.py for the first frame
         cam = figure.scene.camera
         cam.position = [-0.2231539051005686, -0.7217984195639319, -3.1510481045664047]
         cam.focal_point = [
@@ -179,4 +182,4 @@ if __name__ == "__main__":
 
     writer.release()
     mlab.close(all=True)
-    print(f"✅ Video saved to: {output_video}")
+    print(f"Video saved to: {output_video}")
