@@ -5,14 +5,20 @@
         An automated 4D occupancy labeling pipeline based on the <a href="https://arxiv.org/abs/2507.13347">&pi;³ (Pi-Cubed)</a> geometric reconstruction engine.
     </p>
 </div>
-<p align="center">
+
+<div align="center">
+    <p>
         <a href="https://github.com/CallMeFrozenBanana">Nianjing Ye</a><sup>1*</sup>&nbsp;&nbsp;
         <a href="https://github.com/hbl-0624">Binling Huang</a><sup>12*</sup>&nbsp;&nbsp;
-</p>
-<p align="center">
+    </p>
+    <p>
         <sup>1</sup>ChangHong Robotics &nbsp;&nbsp;&nbsp;
         <sup>2</sup>UESTC &nbsp;&nbsp;&nbsp;
-</p>
+    </p>
+    <p>
+        <sup>*</sup> Equal Contribution &nbsp;&nbsp;&nbsp;
+    </p>
+</div>
 
 <p align="center">
     <a href="https://arxiv.org/abs/2507.13347" target="_blank">
@@ -26,8 +32,9 @@
     </a>
 </p>
 
+
 <div align="center">
-  <video src="assets/demo.mp4" width="100%" controls autoplay loop muted>
+  <video src="http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/blob/Update_README.md/assets/demo.mp4?ref_type=heads" width="100%" controls autoplay loop muted>
   </video>
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
@@ -137,8 +144,8 @@ trajectory_1/
 - **all_occ.npz**: Stores the global occupancy grid of the entire scene in world coordinates.
 - **origin_pcd.ply**: The initial global point cloud reconstructed from the video, optimized via voxel downsampling for efficient processing.
 - **episode_000000.parquet**: A structured data table containing per-frame high-level features:
-  - **Camera Intrinsics**: 3x3 matrices re-estimated via Least Squares/DLT based on local geometry.
-  - **Camera Poses**: 4x4 extrinsic matrices predicted by the π³ model and aligned to world coordinates.
+  - **Camera Intrinsics_occ**: 3x3 matrices re-estimated via Least Squares/DLT based on local geometry.
+  - **Camera Extrinsics_occ**: 4x4 extrinsic matrices predicted by the π³ model and aligned to world coordinates.
 
 ##### ii. meta/ (Metadata & Statistics)
 - **info.json**: Defines the dataset schema, including the data types and shapes for observation.camera_extrinsic_occ and observation.camera_intrinsic_occ.
