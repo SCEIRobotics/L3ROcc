@@ -34,7 +34,7 @@
 
 
 <div align="center">
-  <video src="http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/blob/Update_README.md/assets/demo.mp4?ref_type=heads" width="100%" controls autoplay loop muted>
+  <video src="http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/blob/Update_README.md/assets/demo.mp4" width="100%" controls autoplay loop muted>
   </video>
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
