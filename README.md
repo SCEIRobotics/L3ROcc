@@ -37,18 +37,25 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 ### 1. Clone & Install Dependencies
 #### (1). Clone the Repository
 ```bash
-git clone  ssh://git@10.9.46.21:9022/ch_robot/alg_group/vln/occgen.git
+git clone --recursive ssh://git@10.9.46.21:9022/ch_robot/alg_group/vln/occgen.git
 cd occgen
 ```
 #### (2). Install Python Dependencies
 ##### i. For Production (Generating OCC data for InternNav/LeRobot):
+Python 3.10+ is recommended. Install the following dependencies:
 ```bash
+conda create -n <env> python=3.10 -y
+conda activate <env>
 pip install -r requirements.txt
 ```
 ##### ii. For Visualization (Rendering dynamic videos & 3D inspection):
-Python 3.8+ is recommended. Install the following dependencies:
+3D rendering requires a GUI environment. Please set up this environment on your local computer (Windows/macOS/Linux), not on the remote server：
 ```bash
+# Run on your local machine
+conda create -n <env> python=3.8 -y
+conda activate <env>
 pip install -r requirements_visual.txt
+conda install -c conda-forge mayavi
 ```
 (Note: Ensure you have a working OpenGL environment for Mayavi rendering.)
 
