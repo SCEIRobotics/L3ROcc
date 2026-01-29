@@ -14,7 +14,7 @@
 
 
 <div align="center">
-  <img src="assets/demo.gif" width="100%" alt="OccGen Demo">
+  <img src="assets/demo_V2.gif" width="100%" alt="OccGen Demo">
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
@@ -37,7 +37,7 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 ### 1. Clone & Install Dependencies
 #### (1). Clone the Repository
 ```bash
-git clone https://github.com/CallMeFrozenBanana/occgen.git
+git clone  ssh://git@10.9.46.21:9022/ch_robot/alg_group/vln/occgen.git
 cd occgen
 ```
 #### (2). Install Python Dependencies
@@ -84,12 +84,11 @@ Located in `occ/generater/`, the project includes two core generators:
 
 Parameters can be tuned in `occ/configs/config.yaml`:
 
-`voxel_size`: Base size for occupancy voxels (e.g., 0.02m).
-`pc_range`: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
-`interval`: Frame sampling interval for video processing.
-`history_len`: Number of past frames to include in the history (default: 10).
-`history_step`: Step size for history frame sampling (default: 2).
-
+* **`voxel_size`**: Base size for occupancy voxels (e.g., 0.02m).
+* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
+* **`interval`**: Frame sampling interval for video processing.
+* **`history_len`**: Number of past frames to include in history (default: 10).
+* **`history_step`**: Step size for history frame sampling (default: 2).
 
 
 ### 3.Dataset Structure & Contents 
@@ -169,11 +168,13 @@ This project is built upon the following excellent works:
   * [CUT3R](https://github.com/CUT3R/CUT3R)
   * [DUSt3R](https://github.com/naver/dust3r)
 
-## 💡 Core Contributors:
+  * [DUSt3R](https://github.com/naver/dust3r)
 
-* **Nianjing** Ye<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
+## 💡 Core Contributors
 
-* **Binling** Huang<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
+* **Nianjing Ye**<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
+
+* **Binling Huang**<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
 
 <sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     (<sup>*</sup> Equal Contribution)
 
