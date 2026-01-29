@@ -171,9 +171,9 @@ This project is built upon the following excellent works:
 
 ## 💡 Core Contributors:
 
-* **Nianjing** Ye<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
+* **Nianjing Ye**<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
 
-* **Binling** Huang<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
+* **Binling Huang**<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
 
 <sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     (<sup>*</sup> Equal Contribution)
 
