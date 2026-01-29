@@ -169,7 +169,7 @@ This project is built upon the following excellent works:
   * [CUT3R](https://github.com/CUT3R/CUT3R)
   * [DUSt3R](https://github.com/naver/dust3r)
 
-## 💡 Core Contributors:
+## 💡 Core Contributors
 
 * **Nianjing Ye**<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
 
