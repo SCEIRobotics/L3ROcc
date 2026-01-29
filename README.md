@@ -34,9 +34,11 @@
 
 
 <div align="center">
-  <video src="http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/blob/Update_README.md/assets/demo.mp4" width="100%" controls autoplay loop muted>
-  </video>
-  <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
+
+### 🎬 Live Demo
+http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/raw/Update_README.md/assets/demo.mp4
+
+<p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
 `OccGen` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
