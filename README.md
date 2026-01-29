@@ -14,7 +14,7 @@
 
 
 <div align="center">
-  <img src="assets/demo.gif" width="100%" alt="OccGen Demo">
+  <img src="assets/demo_V2.gif" width="100%" alt="OccGen Demo">
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
