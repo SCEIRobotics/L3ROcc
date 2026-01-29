@@ -37,7 +37,7 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 ### 1. Clone & Install Dependencies
 #### (1). Clone the Repository
 ```bash
-git clone https://github.com/CallMeFrozenBanana/occgen.git
+git clone  ssh://git@10.9.46.21:9022/ch_robot/alg_group/vln/occgen.git
 cd occgen
 ```
 #### (2). Install Python Dependencies
