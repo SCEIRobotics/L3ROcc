@@ -17,7 +17,7 @@ class SimpleVideoDataGenerator(DataGenerator):
 
     my_custom_dataset/
     └── custom_videos/                  <-- Group Dir
-        └── office/                     <-- Scene Dir (Video Name)
+        └── office/                     <-- Scene Dir 
             └── trajectory_0/           <-- Trajectory Dir
                 ├── data/
                 │   └── chunk-000/

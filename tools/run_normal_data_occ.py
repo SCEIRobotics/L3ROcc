@@ -23,13 +23,13 @@ def run_normal_data_pipeline():
     # ================= 1. Configuration Parameters  =================
 
     # Root directory for input data
-    input_path = "/mnt/data/huangbinling/project/occgen/inputs/"
+    input_path = "data/examples/"
 
     # Target video filename to process
     video_name = "office.mp4"
 
     # Root directory where the processed output will be saved
-    save_dir = "/mnt/data/huangbinling/project/occgen/outputs/my_custom_dataset"
+    save_dir = "data/examples/outputs/"
 
     # Directory containing pre-trained model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
@@ -46,11 +46,11 @@ def run_normal_data_pipeline():
 
     # [Option 1] visual_pipeline:
     # Generates files required specifically for visualization purposes.
-    # generator.visual_pipeline(full_video_path, pcd_save=True)
+    generator.visual_pipeline(full_video_path, pcd_save=True)
 
     # [Option 2] run_pipeline:
     # Generates files required for the LeRobot format and standard dataset structure.
-    generator.run_pipeline(full_video_path, pcd_save=True)
+    #generator.run_pipeline(full_video_path, pcd_save=True)
 
 
 if __name__ == "__main__":

@@ -1,166 +1,187 @@
-<h1 align="center">🌌 <em>&pi;³</em>: Permutation-Equivariant Visual Geometry Learning</h1>
+<h1 align="center">🌌 OccGen: Scalable 4D Occupancy Generation Pipeline</h1>
 
 <div align="center">
     <p>
-        <a href="https://github.com/yyfz">Yifan Wang</a><sup>1*</sup>&nbsp;&nbsp;
-        <a href="https://zhoutimemachine.github.io">Jianjun Zhou</a><sup>123*</sup>&nbsp;&nbsp;
-        <a href="https://www.haoyizhu.site">Haoyi Zhu</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://github.com/AmberHeart">Wenzheng Chang</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://github.com/yangzhou24">Yang Zhou</a><sup>1</sup>
-        <br>
-        <a href="https://github.com/LiZizun">Zizun Li</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://github.com/SOTAMak1r">Junyi Chen</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://oceanpang.github.io">Jiangmiao Pang</a><sup>1</sup>&nbsp;&nbsp;
-        <a href="https://cshen.github.io">Chunhua Shen</a><sup>2</sup>&nbsp;&nbsp;
-        <a href="https://tonghe90.github.io">Tong He</a><sup>13†</sup>
-    </p>
-    <p>
-        <sup>1</sup>Shanghai AI Lab &nbsp;&nbsp;&nbsp;
-        <sup>2</sup>ZJU &nbsp;&nbsp;&nbsp;
-        <sup>3</sup>SII
-    </p>
-    <p>
-        <sup>*</sup> Equal Contribution &nbsp;&nbsp;&nbsp;
-        <sup>†</sup> Corresponding Author
+        An automated 4D occupancy labeling pipeline based on the <a href="https://arxiv.org/abs/2507.13347">&pi;³ (Pi-Cubed)</a> geometric reconstruction engine.
     </p>
 </div>
+<p align="center">
+        <a href="https://github.com/CallMeFrozenBanana">Nianjing Ye</a><sup>1*</sup>&nbsp;&nbsp;
+        <a href="https://github.com/hbl-0624">Binling Huang</a><sup>12*</sup>&nbsp;&nbsp;
+</p>
+<p align="center">
+        <sup>1</sup>ChangHong Robotics &nbsp;&nbsp;&nbsp;
+        <sup>2</sup>UESTC &nbsp;&nbsp;&nbsp;
+</p>
 
 <p align="center">
     <a href="https://arxiv.org/abs/2507.13347" target="_blank">
-    <img src="https://img.shields.io/badge/Paper-00AEEF?style=plastic&logo=arxiv&logoColor=white" alt="Paper">
+    <img src="https://img.shields.io/badge/Engine-&pi;³-00AEEF?style=plastic&logo=arxiv&logoColor=white" alt="Paper">
     </a>
-    <a href="https://yyfz.github.io/pi3/" target="_blank">
-    <img src="https://img.shields.io/badge/Project Page-F78100?style=plastic&logo=google-chrome&logoColor=white" alt="Project Page">
+    <a href="#" target="_blank">
+    <img src="https://img.shields.io/badge/Python-3.8+-3776AB?style=plastic&logo=python&logoColor=white" alt="Python">
     </a>
-    <a href="https://huggingface.co/spaces/yyfz233/Pi3" target="_blank">
-    <img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Demo-blue" alt="Hugging Face Demo">
+    <a href="#" target="_blank">
+    <img src="https://img.shields.io/badge/Framework-PyTorch-EE4C2C?style=plastic&logo=pytorch&logoColor=white" alt="PyTorch">
     </a>
 </p>
 
 <div align="center">
-    <a href="[PROJECT_PAGE_LINK_HERE]">
-        <img src="assets/main.png" width="90%">
-    </a>
-    <p>
-        <i>&pi;³ reconstructs visual geometry without a fixed reference view, achieving robust, state-of-the-art performance.</i>
-    </p>
+  <video src="assets/demo.mp4" width="100%" controls autoplay loop muted>
+  </video>
+  <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
+`OccGen` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
+The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for robotics learning formats such as InternNav and LeRobot.
 
-## 📣 Updates
-* **[September 3, 2025]** ⭐️ Training code is updated! See `training` branch for details.
-* **[July 29, 2025]** 📈 Evaluation code is released! See `evaluation` branch for details.
-* **[July 16, 2025]** 🚀 Hugging Face Demo and inference code are released!
-
-
-## ✨ Overview
-We introduce $\pi^3$ (Pi-Cubed), a novel feed-forward neural network that revolutionizes visual geometry reconstruction by **eliminating the need for a fixed reference view**. Traditional methods, which rely on a designated reference frame, are often prone to instability and failure if the reference is suboptimal.
-
-In contrast, $\pi^3$ employs a fully **permutation-equivariant** architecture. This allows it to directly predict affine-invariant camera poses and scale-invariant local point maps from an unordered set of images, breaking free from the constraints of a reference frame. This design makes our model inherently **robust to input ordering** and leads to **higher accuracy**.
-
-A key emergent property of our simple, bias-free design is the learning of a dense and structured latent representation of the camera pose manifold. Without complex priors or training schemes, $\pi^3$ achieves **state-of-the-art performance** 🏆 on a wide range of tasks, including camera pose estimation, monocular/video depth estimation, and dense point map estimation.
+## ✨ Key Features
+* **End-to-End Reconstruction**: Directly predicts camera poses, depth maps, and globally consistent point clouds from RGB video streams.
+* **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids with dynamic voxel size calculation based on scene volume.
+* **Visibility Analysis (Ray Casting)**: Performs real-time ray casting based on camera poses to compute visible regions (Visible Masks) and occlusion relationships.
+* **4D Data Serialization**:
+    * **Sparse OCC**: Utilizes Sparse CSR matrices to store temporal occupancy, significantly reducing disk usage.
+    * **Packed Mask**: Implements bit-packing (via `np.packbits`) for visibility masks to optimize storage efficiency.
+* **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and `InternNav` (large-scale datasets).
+* **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
 
 
 ## 🚀 Quick Start
 
 ### 1. Clone & Install Dependencies
-First, clone the repository and install the required packages.
+#### (1). Clone the Repository
 ```bash
-git clone https://github.com/yyfz/Pi3.git
-cd Pi3
+git clone https://github.com/CallMeFrozenBanana/occgen.git
+cd occgen
+```
+#### (2). Install Python Dependencies
+##### i. For Production (Generating OCC data for InternNav/LeRobot):
+```bash
 pip install -r requirements.txt
 ```
-
-### 2\. Run Inference from Command Line
-
-Try our example inference script. You can run it on a directory of images or a video file.
-
-If the automatic download from Hugging Face is slow, you can download the model checkpoint manually from [here](https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors) and specify its local path using the `--ckpt` argument.
-
+##### ii. For Visualization (Rendering dynamic videos & 3D inspection):
+Python 3.8+ is recommended. Install the following dependencies:
 ```bash
-# Run with default example video
-python example.py
-
-# Run on your own data (image folder or .mp4 file)
-python example.py --data_path <path/to/your/images_dir_or_video.mp4>
+pip install -r requirements_visual.txt
 ```
+(Note: Ensure you have a working OpenGL environment for Mayavi rendering.)
 
-**Optional Arguments:**
+### 2.Model Checkpoints
+Place the $\pi^3$ model weights (model.safetensors) and configuration files in the ckpt/ directory at the project root. If the automatic download from Hugging Face is slow, you can download the model checkpoint manually from [here](https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors).
 
-  * `--data_path`: Path to the input image directory or a video file. (Default: `examples/skating.mp4`)
-  * `--save_path`: Path to save the output `.ply` point cloud. (Default: `examples/result.ply`)
-  * `--interval`: Frame sampling interval. (Default: `1` for images, `10` for video)
-  * `--ckpt`: Path to a custom model checkpoint file.
-  * `--device`: Device to run inference on. (Default: `cuda`)
-
-### 3\. Run with Gradio Demo
-
-You can also launch a local Gradio demo for an interactive experience.
-
+### 3. Run Example （The pipeline supports three primary modes）:
+#### Mode A: Generate Visualized Dynamic Video Use this to create side-by-side comparison videos from your own footage with history frames.
 ```bash
-# Install demo-specific requirements
-pip install -r requirements_demo.txt
-
-# Launch the demo
-python demo_gradio.py
+# Ensure you uncomment generator.visual_pipeline in the script
+python tools/run_normal_data_occ.py
+```
+#### Mode B: Generate LeRobot-compatible OCC Data Use this to generate the standard dataset structure for model training.
+```bash
+# Ensure you uncomment generator.run_pipeline in the script
+python tools/run_normal_data_occ.py
+```
+#### Mode C: Batch Process InternNav Dataset To process the full InternNav directory with scale alignment enabled.
+```bash
+python tools/run_intern_nav_occ.py 
 ```
 
+## 🛠️ Pipeline Details
 
-## 🛠️ Detailed Usage
+### 1. Data Generators
 
-### Model Input & Output
+Located in `occ/generater/`, the project includes two core generators:
 
-The model takes a tensor of images and outputs a dictionary containing the reconstructed geometry.
+* **SimpleVideoDataGenerator**: Best for individual videos; automatically builds standard directory structures including `meta/`, `videos/`, and `data/`.
+* **InternNavDataGenerator**: Designed for large-scale InternNav data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth.
 
-  * **Input**: A `torch.Tensor` of shape $B \times N \times 3 \times H \times W$ with pixel values in the range `[0, 1]`.
-  * **Output**: A `dict` with the following keys:
-      * `points`: Global point cloud unprojected by `local points` and `camerae_poses` (`torch.Tensor`, $B \times N \times H \times W \times 3$).
-      * `local_points`: Per-view local point maps (`torch.Tensor`,  $B \times N \times H \times W \times 3$).
-      * `conf`: Confidence scores for local points (values in `[0, 1]` after `torch.sigmoid()`, higher is better) (`torch.Tensor`,  $B \times N \times H \times W \times 1$).
-      * `camera_poses`: Camera-to-world transformation matrices (`4x4` in OpenCV format) (`torch.Tensor`,  $B \times N \times 4 \times 4$).
+### 2. Core Configuration
 
-### Example Code Snippet
+Parameters can be tuned in `occ/configs/config.yaml`:
 
-Here is a minimal example of how to run the model on a batch of images.
+`voxel_size`: Base size for occupancy voxels (e.g., 0.02m).
+`pc_range`: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
+`interval`: Frame sampling interval for video processing.
+`history_len`: Number of past frames to include in the history (default: 10).
+`history_step`: Step size for history frame sampling (default: 2).
 
-```python
-import torch
-from pi3.models.pi3 import Pi3
-from pi3.utils.basic import load_images_as_tensor # Assuming you have a helper function
 
-# --- Setup ---
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = Pi3.from_pretrained("yyfz233/Pi3").to(device).eval()
-# or download checkpoints from `https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors`
 
-# --- Load Data ---
-# Load a sequence of N images into a tensor
-# imgs shape: (N, 3, H, W).
-# imgs value: [0, 1]
-imgs = load_images_as_tensor('path/to/your/data', interval=10).to(device)
+### 3.Dataset Structure & Contents 
 
-# --- Inference ---
-print("Running model inference...")
-# Use mixed precision for better performance on compatible GPUs
-dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+#### (1). InternNav Format
+The following structure is generated under each trajectory directory (e.g., trajectory_1) to ensure compatibility with robotics learning frameworks:
 
-with torch.no_grad():
-    with torch.amp.autocast('cuda', dtype=dtype):
-        # Add a batch dimension -> (1, N, 3, H, W)
-        results = model(imgs[None])
-
-print("Reconstruction complete!")
-# Access outputs: results['points'], results['camera_poses'] and results['local_points'].
+```
+trajectory_1/
+├── data/
+│   └── chunk-000/                 # Core Geometric Assets
+│       ├── all_occ.npz            # Global scene occupancy grid
+│       ├── origin_pcd.ply         # Downsampled global point cloud
+│       └── episode_000000.parquet # Per-frame poses and intrinsics
+├── meta/                          # Metadata & Statistics
+│   ├── info.json                  # Dataset schema and feature definitions
+│   ├── episodes.jsonl             # Episode metadata and Sim3 scale factors
+│   ├── episodes_stats.jsonl       # Feature statistics (min/max/mean/std)
+│   └── tasks.jsonl                # Task descriptions
+└── videos/
+    └── chunk-000/                 # Temporal Sequences
+        ├── observation.occ.mask/
+        │   └── mask_sequence.npz  # Temporal visibility bitmask
+        ├── observation.occ.view/
+        │   └── occ_sequence.npz   # Temporal egocentric occupancy
+        └── observation.video.trajectory/
+            └── reference.mp4      # Original RGB source video
 ```
 
+##### i. data/chunk-000/ (Core Geometric Assets)
+- **all_occ.npz**: Stores the global occupancy grid of the entire scene in world coordinates.
+- **origin_pcd.ply**: The initial global point cloud reconstructed from the video, optimized via voxel downsampling for efficient processing.
+- **episode_000000.parquet**: A structured data table containing per-frame high-level features:
+  - **Camera Intrinsics**: 3x3 matrices re-estimated via Least Squares/DLT based on local geometry.
+  - **Camera Poses**: 4x4 extrinsic matrices predicted by the π³ model and aligned to world coordinates.
+
+##### ii. meta/ (Metadata & Statistics)
+- **info.json**: Defines the dataset schema, including the data types and shapes for observation.camera_extrinsic_occ and observation.camera_intrinsic_occ.
+- **episodes.jsonl**: Contains episode-level constants, most notably the Sim3 Scale Factor used to align the model's relative units to real-world metric scales.
+- **episodes_stats.jsonl**: Automatically calculates the statistical distribution (min, max, mean, std) for all observation vectors.
+- **tasks.jsonl**: Provides task descriptions and objectives for the dataset.
+
+##### iii. videos/chunk-000/ (Temporal Sequences)
+- **observation.occ.mask/mask_sequence.npz**: A time-series of visibility masks. It uses an optimized Bit-packing format to store which voxels are currently visible within the camera's frustum.
+- **observation.occ.view/occ_sequence.npz**: A time-series of egocentric occupancy data. Each frame represents the occupied voxels in the current camera coordinate system, stored as a Sparse CSR Matrix to minimize storage overhead.
+- **observation.video.trajectory/reference.mp4**: The original RGB video sequence used as input for reconstruction.
+
+#### (2). Visual Format
+
+Outputs generated by the `visual_pipeline` are tailored for rendering and manual inspection:
+
+| Directory/File | Description |
+|---------------|-------------|
+| `merge_npy_sequence_cam.npy` | Files per frame in Camera Coordinates, merging initial PCD and visible OCC. |
+| `merge_npy_sequence_world.npy` | Files per frame in World Coordinates, used for rendering dynamic fused videos. |
+| `merge_ply_sequence_cam.ply` | Files per frame in Camera Coordinates for 3D inspection (e.g., MeshLab). |
+| `merge_ply_sequence_world.ply` | Files per frame in World Coordinates for 3D inspection. |
+| `occ_only_cam_npy.npy` | Files per frame containing only visible OCC in Camera Coordinates for rendering. |
+| `occ_only_cam_ply.ply` | Files per frame containing only visible OCC for 3D inspection. |
+
+## 📺 Visualization & Toolbox
+
+A variety of scripts are provided in `utils/visual/` for visualization and analysis:
+
+| Script | Description |
+|--------|-------------|
+| `visual_simple_frame_npy.py` | Interactive OCC viewer with real-time Mayavi camera parameter extraction. |
+| `npy_to_world_video.py` | Generates global-view videos featuring true-color point clouds, trajectories, and OCC. |
+| `npy_to_occ_video.py` | Generates egocentric (first-person) occupancy rendering videos. |
+| `video_composer_to_3.py` | Composes a 3-panel video (Original vs. World Fusion vs. Pure OCC). |
 
 ## 🙏 Acknowledgements
 
-Our work builds upon several fantastic open-source projects. We'd like to express our gratitude to the authors of:
+This project is built upon the following excellent works:
 
-  * [DUSt3R](https://github.com/naver/dust3r)
+  * [π³](https://github.com/yyfz/Pi3)
   * [CUT3R](https://github.com/CUT3R/CUT3R)
-  * [VGGT](https://github.com/facebookresearch/vggt)
+  * [DUSt3R](https://github.com/naver/dust3r)
 
 
 ## 📜 Citation

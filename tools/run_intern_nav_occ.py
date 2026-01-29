@@ -32,10 +32,12 @@ def run_dataset_pipeline():
     # ================= 1. Configuration Parameters =================
 
     # Root directory for the dataset
-    dataset_root = "/mnt/data/huangbinling/project/occgen/all_outputs/debug/debug_seg_fault/traj_data/"
+    dataset_root = "data/examples/small_vln_n1/traj_data/"
 
     # Root directory for saving results
-    output_root = "/mnt/data/huangbinling/project/occgen/all_outputs/debug/debug_seg_fault/traj_data/"
+    output_root = "data/examples/small_vln_n1/traj_data/"
+
+
 
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
