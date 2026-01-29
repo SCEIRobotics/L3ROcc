@@ -1,25 +1,5 @@
 <h1 align="center">🌌 OccGen: Scalable 4D Occupancy Generation Pipeline</h1>
 
-<div align="center">
-    <p>
-        An automated 4D occupancy labeling pipeline based on the <a href="https://arxiv.org/abs/2507.13347">&pi;³ (Pi-Cubed)</a> geometric reconstruction engine.
-    </p>
-</div>
-
-<div align="center">
-    <p>
-        <a href="https://github.com/CallMeFrozenBanana">Nianjing Ye</a><sup>1*</sup>&nbsp;&nbsp;
-        <a href="https://github.com/hbl-0624">Binling Huang</a><sup>12*</sup>&nbsp;&nbsp;
-    </p>
-    <p>
-        <sup>1</sup>ChangHong Robotics &nbsp;&nbsp;&nbsp;
-        <sup>2</sup>UESTC &nbsp;&nbsp;&nbsp;
-    </p>
-    <p>
-        <sup>*</sup> Equal Contribution &nbsp;&nbsp;&nbsp;
-    </p>
-</div>
-
 <p align="center">
     <a href="https://arxiv.org/abs/2507.13347" target="_blank">
     <img src="https://img.shields.io/badge/Engine-&pi;³-00AEEF?style=plastic&logo=arxiv&logoColor=white" alt="Paper">
@@ -34,11 +14,8 @@
 
 
 <div align="center">
-
-### 🎬 Live Demo
-http://10.9.46.21:9080/ch_robot/alg_group/vln/occgen/-/raw/Update_README.md/assets/demo.mp4
-
-<p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
+  <img src="assets/demo.gif" width="100%" alt="OccGen Demo">
+  <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
 `OccGen` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
@@ -192,6 +169,13 @@ This project is built upon the following excellent works:
   * [CUT3R](https://github.com/CUT3R/CUT3R)
   * [DUSt3R](https://github.com/naver/dust3r)
 
+## 💡 Core Contributors:
+
+* **Nianjing** Ye<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
+
+* **Binling** Huang<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
+
+<sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     (<sup>*</sup> Equal Contribution)
 
 ## 📜 Citation
 
