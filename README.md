@@ -84,12 +84,11 @@ Located in `occ/generater/`, the project includes two core generators:
 
 Parameters can be tuned in `occ/configs/config.yaml`:
 
-`voxel_size`: Base size for occupancy voxels (e.g., 0.02m).
-`pc_range`: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
-`interval`: Frame sampling interval for video processing.
-`history_len`: Number of past frames to include in the history (default: 10).
-`history_step`: Step size for history frame sampling (default: 2).
-
+* **`voxel_size`**: Base size for occupancy voxels (e.g., 0.02m).
+* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
+* **`interval`**: Frame sampling interval for video processing.
+* **`history_len`**: Number of past frames to include in history (default: 10).
+* **`history_step`**: Step size for history frame sampling (default: 2).
 
 
 ### 3.Dataset Structure & Contents 
