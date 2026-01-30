@@ -184,7 +184,7 @@ This project is built upon the following excellent works:
 
 * **Hao Xv**<sup>3*</sup> ([GitHub](https://hxwork.github.io/))
 
-<sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     <sup>3</sup>CUHK     <sup>*</sup> Equal Contribution)
+<sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     <sup>3</sup>CUHK     <sup>*</sup> (Equal Contribution)
 
 ## 📜 Citation
 
