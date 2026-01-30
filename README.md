@@ -182,7 +182,7 @@ This project is built upon the following excellent works:
 
 * **Binling Huang**<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
 
-* **Hao Xu**<sup>3*</sup> ([GitHub](https://hxwork.github.io/))
+* **Hao Xu**<sup>3</sup> ([GitHub](https://hxwork.github.io/))
 
 <sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     <sup>3</sup>CUHK     <sup>*</sup> (Equal Contribution)
 
