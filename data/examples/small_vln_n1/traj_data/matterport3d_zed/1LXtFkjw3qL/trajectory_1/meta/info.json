@@ -1,0 +1,164 @@
+{
+    "codebase_version": "v2.1",
+    "robot_type": "unknown",
+    "total_episodes": 1,
+    "total_frames": 104,
+    "total_tasks": 2,
+    "total_videos": 0,
+    "total_chunks": 1,
+    "chunks_size": 1000,
+    "fps": 30,
+    "splits": {
+        "train": "0:1"
+    },
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+    "features": {
+        "observation.camera_intrinsic": {
+            "dtype": "float32",
+            "shape": [
+                3,
+                3
+            ],
+            "names": [
+                "intrinsic_0_0",
+                "intrinsic_0_1",
+                "intrinsic_0_2",
+                "intrinsic_1_0",
+                "intrinsic_1_1",
+                "intrinsic_1_2",
+                "intrinsic_2_0",
+                "intrinsic_2_1",
+                "intrinsic_2_2"
+            ]
+        },
+        "observation.camera_extrinsic": {
+            "dtype": "float32",
+            "shape": [
+                4,
+                4
+            ],
+            "names": [
+                "extrinsic_0_0",
+                "extrinsic_0_1",
+                "extrinsic_0_2",
+                "extrinsic_0_3",
+                "extrinsic_1_0",
+                "extrinsic_1_1",
+                "extrinsic_1_2",
+                "extrinsic_1_3",
+                "extrinsic_2_0",
+                "extrinsic_2_1",
+                "extrinsic_2_2",
+                "extrinsic_2_3",
+                "extrinsic_3_0",
+                "extrinsic_3_1",
+                "extrinsic_3_2",
+                "extrinsic_3_3"
+            ]
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": [
+                4,
+                4
+            ],
+            "names": [
+                "action_0_0",
+                "action_0_1",
+                "action_0_2",
+                "action_0_3",
+                "action_1_0",
+                "action_1_1",
+                "action_1_2",
+                "action_1_3",
+                "action_2_0",
+                "action_2_1",
+                "action_2_2",
+                "action_2_3",
+                "action_3_0",
+                "action_3_1",
+                "action_3_2",
+                "action_3_3"
+            ]
+        },
+        "timestamp": {
+            "dtype": "float32",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "frame_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "observation.camera_extrinsic_occ": {
+            "dtype": "float32",
+            "shape": [
+                4,
+                4
+            ],
+            "names": [
+                "extrinsic_0_0",
+                "extrinsic_0_1",
+                "extrinsic_0_2",
+                "extrinsic_0_3",
+                "extrinsic_1_0",
+                "extrinsic_1_1",
+                "extrinsic_1_2",
+                "extrinsic_1_3",
+                "extrinsic_2_0",
+                "extrinsic_2_1",
+                "extrinsic_2_2",
+                "extrinsic_2_3",
+                "extrinsic_3_0",
+                "extrinsic_3_1",
+                "extrinsic_3_2",
+                "extrinsic_3_3"
+            ]
+        },
+        "observation.camera_intrinsic_occ": {
+            "dtype": "float32",
+            "shape": [
+                3,
+                3
+            ],
+            "names": [
+                "intrinsic_0_0",
+                "intrinsic_0_1",
+                "intrinsic_0_2",
+                "intrinsic_1_0",
+                "intrinsic_1_1",
+                "intrinsic_1_2",
+                "intrinsic_2_0",
+                "intrinsic_2_1",
+                "intrinsic_2_2"
+            ]
+        }
+    }
+}

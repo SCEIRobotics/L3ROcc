@@ -1,7 +1,6 @@
 import faulthandler
-import os
-import sys
 import traceback
+import os
 
 import numpy as np
 
@@ -13,16 +12,11 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-# Add the current directory and project root to sys.path to ensure local modules can be imported
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-sys.path.append(".")
-sys.path.append(project_root)
 
-from occ.dataset.intern_nav_adapter import InternNavSequenceLoader
+from L3ROcc.dataset.intern_nav_adapter import InternNavSequenceLoader
 
 # Import custom modules after setting up the path
-from occ.generater.intern_vln_env import InternNavDataGenerator
+from L3ROcc.generater.intern_vln_env import InternNavDataGenerator
 
 
 def run_dataset_pipeline():
@@ -30,6 +24,8 @@ def run_dataset_pipeline():
     Main pipeline function to load trajectory data and generate OCC (Occupancy) data.
     """
     # ================= 1. Configuration Parameters =================
+    # Project root directory (assumed to be the parent of the current script)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Root directory for the dataset
     dataset_root = "data/examples/small_vln_n1/traj_data/"
@@ -37,13 +33,11 @@ def run_dataset_pipeline():
     # Root directory for saving results
     output_root = "data/examples/small_vln_n1/traj_data/"
 
-
-
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
 
     # Path to the configuration file
-    config_path = os.path.join(project_root, "occ", "configs", "config.yaml")
+    config_path = os.path.join(project_root, "L3ROcc", "configs", "config.yaml")
 
     # ================= 2. Initialization =================
 

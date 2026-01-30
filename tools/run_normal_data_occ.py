@@ -4,14 +4,11 @@ import traceback
 
 import numpy as np
 
-# Add the project root directory to sys.path to ensure local modules can be imported correctly.
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-sys.path.append(".")
-sys.path.append(project_root)
 
-from occ.base import DataGenerator
-from occ.generater.normal_data_vln_env import SimpleVideoDataGenerator
+
+from L3ROcc.base import DataGenerator
+from L3ROcc.generater.normal_data_vln_env import SimpleVideoDataGenerator
+
 
 
 def run_normal_data_pipeline():
@@ -21,6 +18,8 @@ def run_normal_data_pipeline():
     """
 
     # ================= 1. Configuration Parameters  =================
+    # Project root directory (assumed to be the parent of the current script)
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Root directory for input data
     input_path = "data/examples/"
@@ -35,7 +34,7 @@ def run_normal_data_pipeline():
     model_dir = os.path.join(project_root, "ckpt")
 
     # Path to the configuration file (YAML)
-    config_path = os.path.join(project_root, "occ", "configs", "config.yaml")
+    config_path = os.path.join(project_root, "L3ROcc", "configs", "config.yaml")
 
     # ================= 2. Initialization  =================
     print(f"Initializing SimpleVideoDataGenerator with config: {config_path}")

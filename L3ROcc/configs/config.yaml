@@ -1,0 +1,15 @@
+'depth': 10
+'min_density': 0.1
+'n_threads': 1
+'downsample': False
+'voxel_size': 0.02
+'max_nn': 20
+'pc_range':  [-4, -2, -4, 4, 2, 4]
+'occ_size':  [400, 400, 400]
+'self_range': [3.0, 1.5, 2.0]
+'ray_cast_step_size': 1.0
+'interval': 10
+'voxel_size_scale': 100.0
+'history_len': 10
+'history_step': 2
+'fps': 30.0
