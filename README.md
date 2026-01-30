@@ -23,7 +23,7 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 
 ## ✨ Key Features
 * **End-to-End Reconstruction**: Directly predicts camera poses, depth maps, and globally consistent point clouds from RGB video streams.
-* **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids with dynamic voxel size calculation based on scene volume.
+* **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids.
 * **Visibility Analysis (Ray Casting)**: Performs real-time ray casting based on camera poses to compute visible regions (Visible Masks) and occlusion relationships.
 * **4D Data Serialization**:
     * **Sparse OCC**: Utilizes Sparse CSR matrices to store temporal occupancy, significantly reducing disk usage.
@@ -162,18 +162,19 @@ A variety of scripts are provided in `utils/visual/` for visualization and analy
 
 | Script | Description |
 |--------|-------------|
-| `visual_simple_frame_npy.py` | Interactive OCC viewer with real-time Mayavi camera parameter extraction. |
-| `npy_to_world_video.py` | Generates global-view videos featuring true-color point clouds, trajectories, and OCC. |
-| `npy_to_occ_video.py` | Generates egocentric (first-person) occupancy rendering videos. |
-| `video_composer_to_3.py` | Composes a 3-panel video (Original vs. World Fusion vs. Pure OCC). |
+| `visual_simple_frame_npy.py` | Interactive single-frame debugger. Loads individual voxel .npy files, supports interactive view rotation in Mayavi, and prints real-time camera pose parameters (Position/Focal/ViewUp) to determine the optimal fixed view for video rendering. |
+| `visual_simple_frame_npz.py` | Fast sparse matrix viewer. Directly reads compressed .npz  or .npy files to quickly verify the integrity of generated occupancy data without decompressing the entire sequence. |
+| `npy_to_world_video.py` | God's eye (World-View) fusion rendering. Generates third-person global reconstruction videos containing three key elements: true-color background point clouds, global camera trajectories , and accumulated occupancy grids . |
+| `npy_to_occ_video.py` | Egocentric (First-Person) stylized rendering. Generates first-person videos with only local occupancy, using Morandi color palette for depth-gradient shading to showcase pure spatial geometric structures. |
+| `video_composer_to_3.py` | 3-Panel panoramic composer. Horizontally stitches three video streams to generate the final demo video, typically including: original RGB input video, world-view fusion video, and local occupancy video. |
 
 ## 🙏 Acknowledgements
 
 This project is built upon the following excellent works:
 
   * [π³](https://github.com/yyfz/Pi3)
-  * [CUT3R](https://github.com/CUT3R/CUT3R)
-  * [DUSt3R](https://github.com/naver/dust3r)
+  * [Occ3D](https://arxiv.org/pdf/2304.14365)
+  * [SurroundOcc](https://github.com/weiyithu/SurroundOcc)
 
 ## 💡 Core Contributors
 
@@ -181,7 +182,9 @@ This project is built upon the following excellent works:
 
 * **Binling Huang**<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
 
-<sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     (<sup>*</sup> Equal Contribution)
+* **Hao Xv**<sup>3*</sup> ([GitHub](https://hxwork.github.io/))
+
+<sup>1</sup>ChangHong Robotics     <sup>2</sup>UESTC     <sup>3</sup>CUHK     (<sup>*</sup> Equal Contribution)
 
 ## 📜 Citation
 

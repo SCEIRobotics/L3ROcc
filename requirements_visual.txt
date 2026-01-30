@@ -2,3 +2,4 @@ Pyyaml==6.0.3
 numpy==1.24.4
 opencv-python==4.13.0.90
 tqdm==4.67.1
+scipy==1.10.1

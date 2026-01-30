@@ -138,7 +138,7 @@ def get_points_from_path(file_path, frame_index=0):
 if __name__ == "__main__":
 
     # 1. Path to your .npz or .npy file
-    FILE_PATH = "/Users/huangbinling/Documents/trae_projects/occgen/occgen/outputs/debug/trajectory_0/videos/chunk-000/observation.occ.mask/mask_sequence.npz"
+    FILE_PATH = "/trajectory_0/videos/chunk-000/observation.occ.mask/mask_sequence.npz"
 
     # 2. Frame index to visualize (0 for the first frame)
     FRAME_INDEX = 0
