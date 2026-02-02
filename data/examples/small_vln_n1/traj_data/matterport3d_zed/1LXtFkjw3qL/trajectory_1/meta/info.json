@@ -116,6 +116,49 @@
                 1
             ],
             "names": null
+        },
+        "observation.camera_extrinsic_occ": {
+            "dtype": "float32",
+            "shape": [
+                4,
+                4
+            ],
+            "names": [
+                "extrinsic_0_0",
+                "extrinsic_0_1",
+                "extrinsic_0_2",
+                "extrinsic_0_3",
+                "extrinsic_1_0",
+                "extrinsic_1_1",
+                "extrinsic_1_2",
+                "extrinsic_1_3",
+                "extrinsic_2_0",
+                "extrinsic_2_1",
+                "extrinsic_2_2",
+                "extrinsic_2_3",
+                "extrinsic_3_0",
+                "extrinsic_3_1",
+                "extrinsic_3_2",
+                "extrinsic_3_3"
+            ]
+        },
+        "observation.camera_intrinsic_occ": {
+            "dtype": "float32",
+            "shape": [
+                3,
+                3
+            ],
+            "names": [
+                "intrinsic_0_0",
+                "intrinsic_0_1",
+                "intrinsic_0_2",
+                "intrinsic_1_0",
+                "intrinsic_1_1",
+                "intrinsic_1_2",
+                "intrinsic_2_0",
+                "intrinsic_2_1",
+                "intrinsic_2_2"
+            ]
         }
     }
 }

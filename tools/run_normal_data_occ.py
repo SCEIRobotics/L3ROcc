@@ -2,6 +2,14 @@ import os
 import argparse
 from L3ROcc.generater.normal_data_vln_env import SimpleVideoDataGenerator
 
+# Set environment variables to limit thread usage for numerical libraries
+# This is often necessary to prevent CPU oversubscription in multi-process environments
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 def run_normal_data_pipeline(args): 
     """
     Main function to execute the data generation pipeline for a single video.
@@ -39,11 +47,6 @@ def run_normal_data_pipeline(args):
 
 
 if __name__ == "__main__":
-    # Set environment variables to limit thread usage for numerical libraries.
-    # This prevents CPU oversubscription when running multiple processes or heavy computations.
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["MKL_NUM_THREADS"] = "1"
-    
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Run normal data pipeline for video occupancy generation.")
     parser.add_argument("--video_path", type=str, default="data/examples/office.mp4", help="Path to the video file to process.")

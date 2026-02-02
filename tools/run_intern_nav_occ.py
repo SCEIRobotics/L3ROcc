@@ -3,6 +3,7 @@ import traceback
 import os
 
 import numpy as np
+import argparse
 
 # Set environment variables to limit thread usage for numerical libraries
 # This is often necessary to prevent CPU oversubscription in multi-process environments
@@ -19,7 +20,7 @@ from L3ROcc.dataset.intern_nav_adapter import InternNavSequenceLoader
 from L3ROcc.generater.intern_vln_env import InternNavDataGenerator
 
 
-def run_dataset_pipeline():
+def run_dataset_pipeline(args):
     """
     Main pipeline function to load trajectory data and generate OCC (Occupancy) data.
     """
@@ -28,10 +29,10 @@ def run_dataset_pipeline():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # Root directory for the dataset
-    dataset_root = "data/examples/small_vln_n1/traj_data/"
+    dataset_root = args.dataset_root
 
     # Root directory for saving results
-    output_root = "data/examples/small_vln_n1/traj_data/"
+    output_root = args.output_root
 
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
@@ -120,6 +121,12 @@ def run_dataset_pipeline():
 
 if __name__ == "__main__":
     # Enable fault handler to dump stack trace on segfaults
-    faulthandler.enable()
+    parser = argparse.ArgumentParser(description="Run InternNav OCC Pipeline for video occupancy generation")
+    parser.add_argument("--dataset_root", type=str, default="data/examples/small_vln_n1/traj_data/", help="Directory to load dataset")
+    parser.add_argument("--output_root", type=str, default="data/examples/small_vln_n1/traj_data/", help="Directory to save outputs")
 
-    run_dataset_pipeline()
+    args = parser.parse_args()
+
+    faulthandler.enable()
+        
+    run_dataset_pipeline(args)
