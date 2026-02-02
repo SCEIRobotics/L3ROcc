@@ -1,8 +1,8 @@
 import os
-
+import sys
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"  # Prevent OpenMP thread conflicts
-
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 from collections import deque
 
@@ -747,7 +747,7 @@ class DataGenerator:
             pose_rows = [row.astype(np.float32) for row in current_pose]
             all_camera_poses.append(pose_rows)
 
-            # Check visibility
+            # Check visibility 
             occ_indices, cam_visible_mask = self.check_visual_occ(
                 self.occ_pcd, current_pose
             )

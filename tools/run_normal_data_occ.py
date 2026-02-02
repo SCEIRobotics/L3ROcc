@@ -1,17 +1,8 @@
 import os
-import sys
-import traceback
-
-import numpy as np
-
-
-
-from L3ROcc.base import DataGenerator
+import argparse
 from L3ROcc.generater.normal_data_vln_env import SimpleVideoDataGenerator
 
-
-
-def run_normal_data_pipeline():
+def run_normal_data_pipeline(args): 
     """
     Main function to execute the data generation pipeline for a single video.
     This sets up the configuration paths and triggers the generator.
@@ -20,15 +11,9 @@ def run_normal_data_pipeline():
     # ================= 1. Configuration Parameters  =================
     # Project root directory (assumed to be the parent of the current script)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    # Root directory for input data
-    input_path = "data/examples/"
-
-    # Target video filename to process
-    video_name = "office.mp4"
-
+ 
     # Root directory where the processed output will be saved
-    save_dir = "data/examples/outputs/"
+    save_dir = os.path.join(args.save_dir, args.mode) # "data/examples/outputs/"
 
     # Directory containing pre-trained model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
@@ -41,15 +26,16 @@ def run_normal_data_pipeline():
     generator = SimpleVideoDataGenerator(config_path, save_dir, model_dir)
 
     # ================= 3. Execution  =================
-    full_video_path = os.path.join(input_path, video_name)
 
     # [Option 1] visual_pipeline:
     # Generates files required specifically for visualization purposes.
-    generator.visual_pipeline(full_video_path, pcd_save=True)
+    if args.mode == "visual":
+        generator.visual_pipeline(args.video_path, pcd_save=True)
 
     # [Option 2] run_pipeline:
     # Generates files required for the LeRobot format and standard dataset structure.
-    #generator.run_pipeline(full_video_path, pcd_save=True)
+    if args.mode == "run":
+        generator.run_pipeline(args.video_path, pcd_save=True)
 
 
 if __name__ == "__main__":
@@ -57,5 +43,13 @@ if __name__ == "__main__":
     # This prevents CPU oversubscription when running multiple processes or heavy computations.
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
+    
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Run normal data pipeline for video occupancy generation.")
+    parser.add_argument("--video_path", type=str, default="data/examples/office.mp4", help="Path to the video file to process.")
+    parser.add_argument("--save_dir", type=str, default="data/examples/outputs/", help="Path to the directory where processed outputs will be saved.")
+    parser.add_argument("--mode", type=str, default="visual", help="Mode to run the pipeline in. Options: 'visual' or 'run'.") 
 
-    run_normal_data_pipeline()
+    args = parser.parse_args()
+    print("args: \n", args)
+    run_normal_data_pipeline(args)

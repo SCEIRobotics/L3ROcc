@@ -18,18 +18,22 @@
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
 </div>
 
-`OccGen` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
-The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for robotics learning formats such as InternNav and LeRobot.
+`L3ROcc` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
+The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for navigation learning. The processed data is formatted according to the **LeRobotDataset v2.1** specification.
 
 ## ✨ Key Features
-* **End-to-End Reconstruction**: Directly predicts camera poses, depth maps, and globally consistent point clouds from RGB video streams.
+* **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and scale-invariant globally point clouds from RGB video streams.
 * **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids.
-* **Visibility Analysis (Ray Casting)**: Performs real-time ray casting based on camera poses to compute visible regions (Visible Masks) and occlusion relationships.
+* **Visibility Analysis**: Performs real-time ray casting based on intrinsic and extrinsic parameters of camera to compute visible regions (Visible Masks) and occlusion relationships.
 * **4D Data Serialization**:
     * **Sparse OCC**: Utilizes Sparse CSR matrices to store temporal occupancy, significantly reducing disk usage.
     * **Packed Mask**: Implements bit-packing (via `np.packbits`) for visibility masks to optimize storage efficiency.
 * **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and `InternNav` (large-scale datasets).
 * **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
+
+## 💡 Future Work 
+- [ ] **Semantic Point Cloud**: Integrate semantic segmentation, and instance segmentation to enhance reconstruction quality.
+- [ ] **Multi-modal Fusion**: Integrate depth maps to enhance reconstruction quality.
 
 
 ## 🚀 Quick Start
@@ -66,13 +70,11 @@ Place the $\pi^3$ model weights (model.safetensors) and configuration files in t
 ### 3. Run Example （The pipeline supports three primary modes）:
 #### Mode A: Generate Visualized Dynamic Video Use this to create side-by-side comparison videos from your own footage with history frames.
 ```bash
-# Ensure you uncomment generator.visual_pipeline in the script
-python tools/run_normal_data_occ.py
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode visual
 ```
-#### Mode B: Generate LeRobot-compatible OCC Data Use this to generate the standard dataset structure for model training.
+#### Mode B: Generate LeRobot-compatible Data Use this to generate the standard dataset structure for model training.
 ```bash
-# Ensure you uncomment generator.run_pipeline in the script
-python tools/run_normal_data_occ.py
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode run
 ```
 #### Mode C: Batch Process InternNav Dataset To process the full InternNav directory with scale alignment enabled.
 ```bash
@@ -83,14 +85,14 @@ python tools/run_intern_nav_occ.py
 
 ### 1. Data Generators
 
-Located in `occ/generater/`, the project includes two core generators:
+Located in `L3ROcc/generater/`, the project includes two core generators:
 
 * **SimpleVideoDataGenerator**: Best for individual videos; automatically builds standard directory structures including `meta/`, `videos/`, and `data/`.
 * **InternNavDataGenerator**: Designed for large-scale InternNav data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth.
 
 ### 2. Core Configuration
 
-Parameters can be tuned in `occ/configs/config.yaml`:
+Parameters can be tuned in `L3ROcc/configs/config.yaml`:
 
 * **`voxel_size`**: Base size for occupancy voxels (e.g., 0.02m).
 * **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`.
@@ -176,14 +178,11 @@ This project is built upon the following excellent works:
   * [π³](https://github.com/yyfz/Pi3)
   * [Occ3D](https://arxiv.org/pdf/2304.14365)
   * [SurroundOcc](https://github.com/weiyithu/SurroundOcc)
+  * [InternData-N1](https://huggingface.co/datasets/InternRobotics/InternData-N1)
 
-## 💡 Core Contributors
+## 🐼 Core Contributors
 
-* **Nianjin Ye**<sup>1*</sup> ([GitHub](https://github.com/CallMeFrozenBanana))
-
-* **Binling Huang**<sup>12*</sup> ([GitHub](https://github.com/hbl-0624))
-
-* **Hao Xu**<sup>3</sup> ([GitHub](https://hxwork.github.io/))
+**Nianjin Ye**<sup>1*</sup>([GitHub](https://github.com/CallMeFrozenBanana)), **Binling Huang**<sup>12*</sup>([GitHub](https://github.com/hbl-0624)), **Hao Xu**<sup>3</sup>([GitHub](https://hxwork.github.io/))
 
 <sup>1</sup>Sichuan Embodied Intelligence Robot Training Base     <sup>2</sup>UESTC     <sup>3</sup>CUHK     <sup>*</sup> (Equal Contribution)
 
