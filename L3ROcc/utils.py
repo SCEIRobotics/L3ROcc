@@ -276,7 +276,17 @@ def estimate_intrinsics(coords):
 
 
 def voxel2points(pred_occ, mask_camera=None, free_label=0):
+    """
+    Convert voxel occupancy to 3D points.
 
+    Args:
+        pred_occ: Tensor of shape (D, H, W), voxel occupancy predictions.
+        mask_camera: Optional, Tensor of shape (D, H, W), camera mask.
+        free_label: Integer, label value for free space.
+
+    Returns:
+        fov_voxels: Tensor of shape (N, 4), 3D points (X, Y, Z, occ) in the camera FOV.
+    """ 
     d, h, w = pred_occ.shape
 
     x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=pred_occ.dtype)
@@ -301,6 +311,18 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
 
 
 def pcd_to_voxels(pcd, voxel_size, pcd_range):
+    '''
+    Convert point cloud to voxel occupancy.
+
+    Args:
+        pcd: Tensor of shape (N, 3), point cloud (X, Y, Z).
+        voxel_size: Float, voxel size.
+        pcd_range: List of 3 floats, [x_min, y_min, z_min] defining the range of the point cloud.
+
+    Returns:
+        occ_voxels: Tensor of shape (D, H, W), voxel occupancy.
+    '''
+
     # Note: Ensure correspondence between pcd xyz and pcd_range
     occ_voxels = pcd.clone() if isinstance(pcd, torch.Tensor) else pcd.copy()
     occ_voxels[:, 0] = occ_voxels[:, 0] - pcd_range[0]
@@ -311,6 +333,17 @@ def pcd_to_voxels(pcd, voxel_size, pcd_range):
 
 
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
+    '''
+    Convert voxel occupancy to point cloud.
+
+    Args:
+        occ_voxels: Tensor of shape (D, H, W), voxel occupancy.
+        voxel_size: Float, voxel size.
+        pcd_range: List of 3 floats, [x_min, y_min, z_min] defining the range of the point cloud.
+
+    Returns:
+        pcd: Tensor of shape (N, 3), point cloud (X, Y, Z).
+    '''
     pcd = (
         occ_voxels.clone()
         if isinstance(occ_voxels, torch.Tensor)
