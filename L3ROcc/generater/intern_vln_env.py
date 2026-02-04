@@ -357,7 +357,7 @@ class InternNavDataGenerator(DataGenerator):
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(pcd)
         )
-        
+
         # Save global data
         self.save_global_data(paths)
 

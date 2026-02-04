@@ -10,7 +10,8 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
-def run_normal_data_pipeline(args): 
+
+def run_normal_data_pipeline(args):
     """
     Main function to execute the data generation pipeline for a single video.
     This sets up the configuration paths and triggers the generator.
@@ -19,9 +20,9 @@ def run_normal_data_pipeline(args):
     # ================= 1. Configuration Parameters  =================
     # Project root directory (assumed to be the parent of the current script)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
- 
+
     # Root directory where the processed output will be saved
-    save_dir = os.path.join(args.save_dir, args.mode) # "data/examples/outputs/"
+    save_dir = os.path.join(args.save_dir, args.mode)  # "data/examples/outputs/"
 
     # Directory containing pre-trained model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
@@ -48,10 +49,27 @@ def run_normal_data_pipeline(args):
 
 if __name__ == "__main__":
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description="Run normal data pipeline for video occupancy generation.")
-    parser.add_argument("--video_path", type=str, default="data/examples/office.mp4", help="Path to the video file to process.")
-    parser.add_argument("--save_dir", type=str, default="data/examples/outputs/", help="Path to the directory where processed outputs will be saved.")
-    parser.add_argument("--mode", type=str, default="visual", help="Mode to run the pipeline in. Options: 'visual' or 'run'.") 
+    parser = argparse.ArgumentParser(
+        description="Run normal data pipeline for video occupancy generation."
+    )
+    parser.add_argument(
+        "--video_path",
+        type=str,
+        default="data/examples/office.mp4",
+        help="Path to the video file to process.",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="data/examples/outputs/",
+        help="Path to the directory where processed outputs will be saved.",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="visual",
+        help="Mode to run the pipeline in. Options: 'visual' or 'run'.",
+    )
 
     args = parser.parse_args()
     print("args: \n", args)

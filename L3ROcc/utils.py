@@ -286,7 +286,7 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
 
     Returns:
         fov_voxels: Tensor of shape (N, 4), 3D points (X, Y, Z, occ) in the camera FOV.
-    """ 
+    """
     d, h, w = pred_occ.shape
 
     x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=pred_occ.dtype)
@@ -311,7 +311,7 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
 
 
 def pcd_to_voxels(pcd, voxel_size, pc_range):
-    '''
+    """
     Convert point cloud to voxel occupancy.
 
     Args:
@@ -321,25 +321,25 @@ def pcd_to_voxels(pcd, voxel_size, pc_range):
 
     Returns:
         occ_voxels: Tensor of shape (D, H, W), voxel occupancy.
-    '''
+    """
 
     # Note: Ensure correspondence between pcd xyz and pcd_range
     if isinstance(pcd, torch.Tensor):
         device = pcd.device
         dtype = pcd.dtype
-        
+
         if isinstance(pc_range, torch.Tensor):
             range_min = pc_range[:3].to(device)
         else:
             range_min = torch.tensor(pc_range[:3], device=device, dtype=dtype)
-            
+
         # 计算索引
         voxel_indices = torch.floor((pcd - range_min) / voxel_size).long()
         return voxel_indices
 
     else:
         range_np = pc_range
-        
+
         if isinstance(range_np, torch.Tensor):
             range_np = range_np.detach().cpu().numpy()
         if isinstance(pcd, torch.Tensor):
@@ -353,11 +353,13 @@ def pcd_to_voxels(pcd, voxel_size, pc_range):
 
         return np.floor(pcd_np).astype(np.int32)
 
+
 import torch
 import numpy as np
 
+
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
-    '''
+    """
     Convert voxel indices to point cloud coordinates.
     Compatible with both NumPy arrays and PyTorch Tensors (CPU/GPU).
 
@@ -368,27 +370,28 @@ def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
 
     Returns:
         pcd: (N, 3) Float coordinates. Type matches input (Tensor -> Tensor, Numpy -> Numpy).
-    '''
+    """
 
     if isinstance(occ_voxels, torch.Tensor):
         pcd = occ_voxels.clone().float()
-        
+
         pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
         pcd[:, 0] += pcd_range[0]
         pcd[:, 1] += pcd_range[1]
         pcd[:, 2] += pcd_range[2]
-        
+
         return pcd
     else:
         pcd = occ_voxels.copy().astype(np.float32)
-        
+
         pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
-        
+
         pcd[:, 0] += pcd_range[0]
         pcd[:, 1] += pcd_range[1]
         pcd[:, 2] += pcd_range[2]
-        
+
         return pcd
+
 
 def homogenize_points(
     points,

@@ -121,12 +121,24 @@ def run_dataset_pipeline(args):
 
 if __name__ == "__main__":
     # Enable fault handler to dump stack trace on segfaults
-    parser = argparse.ArgumentParser(description="Run InternNav OCC Pipeline for video occupancy generation")
-    parser.add_argument("--dataset_root", type=str, default="data/examples/small_vln_n1/traj_data/", help="Directory to load dataset")
-    parser.add_argument("--output_root", type=str, default="data/examples/small_vln_n1/traj_data/", help="Directory to save outputs")
+    parser = argparse.ArgumentParser(
+        description="Run InternNav OCC Pipeline for video occupancy generation"
+    )
+    parser.add_argument(
+        "--dataset_root",
+        type=str,
+        default="data/examples/small_vln_n1/traj_data/",
+        help="Directory to load dataset",
+    )
+    parser.add_argument(
+        "--output_root",
+        type=str,
+        default="data/examples/small_vln_n1/traj_data/",
+        help="Directory to save outputs",
+    )
 
     args = parser.parse_args()
 
     faulthandler.enable()
-        
+
     run_dataset_pipeline(args)

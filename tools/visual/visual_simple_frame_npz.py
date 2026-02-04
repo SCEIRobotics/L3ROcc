@@ -13,7 +13,7 @@ import scipy.sparse as sparse
 # ==============================================================================
 
 
-def get_points_from_path(file_path, frame_index=0,  config=None):
+def get_points_from_path(file_path, frame_index=0, config=None):
     """
     Universal data loader: Supports Sparse CSR, Optimized Packbits, and Legacy NPY formats.
 
@@ -147,9 +147,9 @@ if __name__ == "__main__":
     # 3. Background color setting (True for Black, False for White)
     BG_BLACK = True
 
-    #4. Config
-    config_path = '/L3ROcc/configs/config.yaml'
-    with open(config_path, 'r') as stream:
+    # 4. Config
+    config_path = "/L3ROcc/configs/config.yaml"
+    with open(config_path, "r") as stream:
         config = yaml.safe_load(stream)
 
     # ==========================================
