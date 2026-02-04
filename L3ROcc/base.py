@@ -192,17 +192,53 @@ class DataGenerator:
 
         return pcd, camera_pose, norm_cam_ray_cam_coords.reshape(-1, 3)
 
-    def pcd_to_occ(self, pcd):
+    def pcd_to_occ(self, scene_points):
         """
         Converts a point cloud into an occupancy representation.
         Steps: Mesh Reconstruction -> Vertex Sampling -> Spatial Filtering -> Voxelization -> World Coord Recovery.
 
         Args:
+            scene_points : The input point cloud (N, 3).
+
+        Returns:
+            occ_pcd: Occupancy point cloud (M, 3).
+        """
+        if not isinstance(scene_points, torch.Tensor):
+            device = self.device  
+            scene_points = torch.from_numpy(scene_points).float().to(device)
+        else:
+            device = scene_points.device
+
+        pc_range_min = torch.tensor(self.pc_range[:3], device=device)
+        pc_range_max = torch.tensor(self.pc_range[3:], device=device)
+        voxel_size = self.voxel_size
+
+        mask = (
+            (scene_points[:, 0] > pc_range_min[0]) & (scene_points[:, 0] < pc_range_max[0]) &
+            (scene_points[:, 1] > pc_range_min[1]) & (scene_points[:, 1] < pc_range_max[1]) &
+            (scene_points[:, 2] > pc_range_min[2]) & (scene_points[:, 2] < pc_range_max[2])
+        )
+        scene_points = scene_points[mask]
+
+        voxel_indices = torch.floor((scene_points - pc_range_min) / voxel_size).long()
+
+        unique_voxel_indices = torch.unique(voxel_indices, dim=0)
+
+        occ_pcd = unique_voxel_indices.float() * voxel_size + pc_range_min + (voxel_size * 0.5)
+
+        return occ_pcd
+
+    def pcd_to_points(self, pcd):
+        """
+        Converts a point cloud into a set of points.
+
+        Args:
             pcd : The input point cloud (N, 3).
 
         Returns:
-            occ_pcd: Occupancy point cloud in world coordinates (M, 3).
+            points: Point cloud in world coordinates (N, 3).
         """
+        # Convert to Open3D PointCloud object
         pcd = pcd.cpu().numpy() if isinstance(pcd, torch.Tensor) else pcd
         point_cloud_original = o3d.geometry.PointCloud()
         with_normal2 = o3d.geometry.PointCloud()
@@ -223,33 +259,9 @@ class DataGenerator:
             mesh.vertices, dtype=float
         )  # Extract vertices (denser representation)
 
-        ################## Filter points within spatial range ##############
-        mask = (
-            (np.abs(scene_points[:, 0]) < self.pc_range[3])
-            & (np.abs(scene_points[:, 1]) < self.pc_range[4])
-            & (scene_points[:, 2] > self.pc_range[2])
-            & (scene_points[:, 2] < self.pc_range[5])
-        )  # Filter bounds: [x_min, y_min, z_min, x_max, y_max, z_max]
-        scene_points = scene_points[mask]
+        return scene_points
 
-        ################## Convert points to voxel indices ##############
-        pcd_np = scene_points.copy()
-        # Transform World -> Voxel Indices
-        pcd_np[:, 0] = (pcd_np[:, 0] - self.pc_range[0]) / self.voxel_size
-        pcd_np[:, 1] = (pcd_np[:, 1] - self.pc_range[1]) / self.voxel_size
-        pcd_np[:, 2] = (pcd_np[:, 2] - self.pc_range[2]) / self.voxel_size
-
-        pcd_np = np.floor(pcd_np).astype(np.int32)
-        fov_voxels = np.unique(pcd_np, axis=0).astype(
-            np.float64
-        )  # Remove duplicates to get unique occupied voxels
-
-        ################## Convert voxel indices back to world coords ##############
-        occ_pcd = voxels_to_pcd(fov_voxels, self.voxel_size, self.pc_range)
-
-        return occ_pcd
-
-    def check_visual_occ(self, occ_pcd, camera_pose):
+    def check_visual_occ(self, occ_pcd_cam):
         """
         Performs Ray Casting to check which occupancy voxels are visible from the current camera pose.
 
@@ -262,11 +274,6 @@ class DataGenerator:
                 - occ_voxels : Visible occupied voxels in Camera Coordinates (K, 3).
                 - camera_visible_mask : All voxels traversed by rays (Free + Occupied) in Camera Coordinates (M, 3).
         """
-        # Transform global OCC to current Camera Coordinates
-        occ_pcd_cam = self.convert_pointcloud_world_to_camera(
-            occ_pcd, camera_pose
-        )  # Shape: (-1, 3) in meters
-
         # Transform Camera Coords to Voxel Indices
         occ_voxels = pcd_to_voxels(
             occ_pcd_cam, self.voxel_size, self.pc_range
@@ -384,27 +391,32 @@ class DataGenerator:
 
     def convert_pointcloud_world_to_camera(self, points_world, T_cw):
         """
-        Transforms point cloud from World Coordinate System to Camera Coordinate System.
-
-        Args:
-            points_world : Points in world frame (N, 3).
-            T_cw : Camera extrinsic matrix (4, 4).
-
-        Returns:
-            points_camera: Points in camera frame (N, 3).
+        Transforms point cloud from World to Camera frame.
+        Supports both Numpy and PyTorch Tensor (GPU).
         """
-        # 1. Extract Rotation and Translation
-        R_cw = T_cw[:3, :3]
-        t_cw = T_cw[:3, 3]
+        # 1. Tensor Mode (GPU Optimized)
+        if isinstance(points_world, torch.Tensor):
+            if not isinstance(T_cw, torch.Tensor):
+                T_cw = torch.tensor(T_cw, device=points_world.device, dtype=points_world.dtype)
+            
+            R_cw = T_cw[:3, :3]
+            t_cw = T_cw[:3, 3]
+            
+            # Logic: P_cam = (P_world - t_cw) @ R_cw
+            # Note: R_wc = R_cw.T. The formula is P_cam = (R_wc @ (P_world - t_cw).T).T
+            # Which simplifies to: (P_world - t_cw) @ R_wc.T => (P_world - t_cw) @ R_cw
+            points_camera = (points_world - t_cw) @ R_cw
+            return points_camera
 
-        # 2. Compute World -> Camera transformation
-        R_wc = R_cw.T  # Inverse of rotation
-        t_wc = -R_wc @ t_cw
-
-        # 3. Transform points
-        points_camera = (R_wc @ (points_world - t_cw).T).T
-
-        return points_camera
+        # 2. Numpy Mode (Legacy)
+        else:
+            if len(points_world) == 0:
+                return np.zeros((0, 3), dtype=np.float32)
+            R_cw = T_cw[:3, :3]
+            t_cw = T_cw[:3, 3]
+            R_wc = R_cw.T
+            points_camera = (R_wc @ (points_world - t_cw).T).T
+            return points_camera.astype(np.float32)
 
     def convert_pointcloud_camera_to_world(self, points_camera, T_cw):
         """
@@ -644,12 +656,22 @@ class DataGenerator:
         """
         import shutil
 
-        for p in [paths["ply"], paths["global_occ"]]:
-            if os.path.isdir(p):
-                shutil.rmtree(p)
-
-        write_ply(self.pcd, self.pcd_color, paths["ply"])
-        np.savez_compressed(paths["global_occ"], data=self.occ_pcd.astype(np.float32))
+        pcd_to_save = self.pcd
+        if isinstance(pcd_to_save, torch.Tensor):
+            pcd_to_save = pcd_to_save.detach().cpu().numpy()
+            
+        pcd_color_to_save = self.pcd_color
+        if isinstance(pcd_color_to_save, torch.Tensor):
+            pcd_color_to_save = pcd_color_to_save.detach().cpu().numpy()
+            
+        write_ply(pcd_to_save, pcd_color_to_save, paths["ply"])
+        occ_pcd_to_save = self.occ_pcd
+        
+        if isinstance(occ_pcd_to_save, torch.Tensor):
+            occ_pcd_to_save = occ_pcd_to_save.detach().cpu().numpy()
+        
+        np.savez_compressed(paths["global_occ"], data=occ_pcd_to_save.astype(np.float32))
+        print(f"Saved Global Data to {paths['global_occ']}")
 
     def save_sequence_data(self, paths, sparse_occ_indices, packed_mask_data):
         """
@@ -705,7 +727,7 @@ class DataGenerator:
             )
             print(f"Saved Mask in {time.time() - t_start:.2f}s")
 
-    def compute_sequence_data(self):
+    def compute_sequence_data(self, pcd):
         """
         Computes sequential data for the entire trajectory, including sparse OCC indices
         and compressed visibility masks.
@@ -722,6 +744,7 @@ class DataGenerator:
         """
         total_frames = len(self.camera_pose)
         grid_dims = self.config["occ_size"]  # (H, W, D)
+        device = self.device
 
         # Lists for storage
         all_sparse_indices_occ = []
@@ -737,25 +760,32 @@ class DataGenerator:
         all_camera_intrinsics = [
             [row.copy() for row in intrinsic_rows] for _ in range(total_frames)
         ]
+        
+        # Convert pcd to points 
+        pcd_points_world_np = self.pcd_to_points(pcd)
+        pcd_points_world = torch.from_numpy(pcd_points_world_np).float().to(device)
 
         print(f"Processing {total_frames} frames (Simple Packed Mode)...")
         occ_start = time.time()
         for i in range(total_frames):
-            current_pose = self.camera_pose[i]
+            current_pose_np = self.camera_pose[i]
+            current_pose = torch.from_numpy(current_pose_np).float().to(device)
 
             # Collect extrinsics
-            pose_rows = [row.astype(np.float32) for row in current_pose]
+            pose_rows = [row.astype(np.float32) for row in current_pose_np]
             all_camera_poses.append(pose_rows)
 
+            # Transform global OCC to current Camera Coordinates
+            pcd_points_cam = self.convert_pointcloud_world_to_camera(
+                pcd_points_world, current_pose
+            )  # Shape: (-1, 3) in meters
+            
+            # Convert to occupancy (pcd is maintained at aligned scale)
+            self.occ_pcd = self.pcd_to_occ(pcd_points_cam)
+        
             # Check visibility 
-            occ_indices, cam_visible_mask = self.check_visual_occ(
-                self.occ_pcd, current_pose
-            )
+            occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd)
 
-            if isinstance(occ_indices, torch.Tensor):
-                occ_indices = occ_indices.detach().cpu().numpy()
-            if isinstance(cam_visible_mask, torch.Tensor):
-                cam_visible_mask = cam_visible_mask.detach().cpu().numpy()
 
             # --- Process OCC Indices (Sparse) ---
             valid_mask_occ = (
@@ -766,11 +796,12 @@ class DataGenerator:
                 & (occ_indices[:, 2] >= 0)
                 & (occ_indices[:, 2] < grid_dims[2])
             )
-            valid_voxels_occ = occ_indices[valid_mask_occ].astype(np.int16)
+            valid_voxels_occ = occ_indices[valid_mask_occ]
             if len(valid_voxels_occ) > 0:
-                time_col = np.full((len(valid_voxels_occ), 1), i, dtype=np.int16)
-                all_sparse_indices_occ.append(np.hstack([time_col, valid_voxels_occ]))
-
+                time_col = torch.full((len(valid_voxels_occ), 1), i, device=device, dtype=torch.int16)
+                frame_indices = torch.cat([time_col, valid_voxels_occ.short()], dim=1)
+                all_sparse_indices_occ.append(frame_indices.cpu().numpy())
+                
             # --- Process Mask (Packed Bits) ---
             # Filter bounds
             valid_mask_cam = (
@@ -781,7 +812,7 @@ class DataGenerator:
                 & (cam_visible_mask[:, 2] >= 0)
                 & (cam_visible_mask[:, 2] < grid_dims[2])
             )
-            valid_voxels_cam = cam_visible_mask[valid_mask_cam].astype(np.int64)
+            valid_voxels_cam = cam_visible_mask[valid_mask_cam].long().cpu().numpy()
 
             # Construct single frame Bool Grid (memory intensive momentarily)
             frame_grid = np.zeros(grid_dims, dtype=bool)
@@ -798,7 +829,7 @@ class DataGenerator:
             if i % 50 == 0:
                 print(f"  Frame {i}/{total_frames} packed.")
         occ_end = time.time()
-        print(f"occ gen cost: {occ_end - occ_start}s")
+        print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
 
         # --- Merge ---
         final_occ = (
@@ -849,7 +880,7 @@ class DataGenerator:
             pcd_save : If True, saves visualization files (occ.ply, etc.).
 
         Returns:
-            None: Sets self.occ_pcd (Global OCC) and self.camera_pose, and optionally saves files.
+            None: Sets self.camera_pose, and optionally saves files.
         """
         self.camera_intric = np.array(
             [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
@@ -861,19 +892,19 @@ class DataGenerator:
             input_path, pcd_save
         )
 
-        # Generate Global OCC Map (World Coordinates, point cloud state)
-        self.occ_pcd = self.pcd_to_occ(pcd)
+        # Transform global OCC to current Camera Coordinates
+        pcd_cam_0 = self.convert_pointcloud_world_to_camera(pcd, self.camera_pose[0])  # Shape: (-1, 3) in meters
+        # Convert to occupancy (pcd is maintained at aligned scale)
+        occ_pcd_cam_points_0 = self.pcd_to_points(pcd_cam_0)
+        occ_pcd_cam_0 = self.pcd_to_occ(occ_pcd_cam_points_0)
 
         # Check visibility for Frame 0
         occ_voxels_visual_0, visual_mask_0 = self.check_visual_occ(
-            self.occ_pcd, self.camera_pose[0]
+            occ_pcd_cam_0
         )
 
         if pcd_save:
             save_path = input_path.split("videos/")[0]
-            occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
-                self.occ_pcd, self.camera_pose[0]
-            )
             write_ply(
                 occ_pcd_cam_0[:, :3], path=os.path.join(self.save_path, "occ.ply")
             )
@@ -914,13 +945,13 @@ class DataGenerator:
             None: Output files are saved to self.save_path.
         """
 
-        # 1. Reconstruct global map and trajectory
+        # Reconstruct global map and trajectory
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
 
-        # 2. Generate global point cloud
-        self.occ_pcd = self.pcd_to_occ(pcd)
+        if isinstance(pcd, torch.Tensor):
+            pcd = pcd.detach().cpu().numpy()
 
-        # 3. Save visualization data if requested
+        # Save visualization data if requested
         if pcd_save:
             print("Start processing sequence frames...")
 
@@ -955,9 +986,17 @@ class DataGenerator:
                 os.makedirs(occ_only_cam_npy_dir)
 
             total_frames = len(self.camera_pose)
-            occ_pcd_cam_0 = self.convert_pointcloud_world_to_camera(
-                self.occ_pcd, self.camera_pose[0]
+
+            # --- Handle Frame 0 (Safe Conversion) ---
+            pcd_cam_0 = self.convert_pointcloud_world_to_camera(
+                pcd, self.camera_pose[0]
             )
+            if isinstance(pcd_cam_0, torch.Tensor): pcd_cam_0 = pcd_cam_0.cpu().numpy()
+
+            occ_pcd_cam_points_0 = self.pcd_to_points(pcd_cam_0)
+            occ_pcd_cam_0 = self.pcd_to_occ(occ_pcd_cam_points_0)
+            if isinstance(occ_pcd_cam_0, torch.Tensor): occ_pcd_cam_0 = occ_pcd_cam_0.cpu().numpy()
+
             write_ply(
                 occ_pcd_cam_0[:, :3],
                 path=os.path.join(self.save_path, "all_occ_cam.ply"),
@@ -965,14 +1004,29 @@ class DataGenerator:
 
             # Clear history buffer before processing new video
             self.occ_history_buffer.clear()
+            
+            # Convert global pcd to points
+            pcd_points = self.pcd_to_points(pcd)
+            # Process each frame in the sequence
             occ_start = time.time()
             for i in range(total_frames):
                 current_pose = self.camera_pose[i]
 
                 # ================= A. Compute Data =================
 
+                # Transform global pcd to current Camera Coordinates
+                #World -> Camera Coordinates
+                pcd_cam = self.convert_pointcloud_world_to_camera(pcd_points, current_pose)  # Shape: (-1, 3) in meters
+                if isinstance(pcd_cam, torch.Tensor): pcd_cam = pcd_cam.detach().cpu().numpy()      
+
+                # Convert to occupancy (pcd is maintained at aligned scale)
+                occ_pcd_cam = self.pcd_to_occ(pcd_cam)
+                if isinstance(occ_pcd_cam, torch.Tensor): occ_pcd_cam = occ_pcd_cam.detach().cpu().numpy()
+
                 # Calculate visible Occ for current frame
-                occ_indices, _ = self.check_visual_occ(self.occ_pcd, current_pose)
+                occ_indices, _ = self.check_visual_occ(occ_pcd_cam)
+                if isinstance(occ_indices, torch.Tensor): occ_indices = occ_indices.detach().cpu().numpy()
+
                 single_frame_occ_cam = voxels_to_pcd(
                     occ_indices, self.voxel_size, self.pc_range
                 )
@@ -985,17 +1039,20 @@ class DataGenerator:
                 single_frame_occ_world = self.convert_pointcloud_camera_to_world(
                     single_frame_occ_cam, current_pose
                 )
+                if isinstance(single_frame_occ_world, torch.Tensor): single_frame_occ_world = single_frame_occ_world.detach().cpu().numpy()
 
                 # Get accumulated result from sliding window
                 save_flag = i % self.history_step == 0
                 local_occ_cam, local_occ_world = self.get_temporal_occ(
                     single_frame_occ_world, current_pose, save_to_history=save_flag
                 )
+                if isinstance(local_occ_world, torch.Tensor): local_occ_world = local_occ_world.detach().cpu().numpy()
 
                 # Calculate Background and Trajectory
                 bg_cam = self.convert_pointcloud_world_to_camera(
-                    self.occ_pcd, current_pose
+                    occ_pcd_cam, current_pose
                 )
+                if isinstance(bg_cam, torch.Tensor): bg_cam = bg_cam.detach().cpu().numpy()
                 if bg_cam.shape[1] == 4:
                     bg_cam = bg_cam[:, :3]
 
@@ -1003,13 +1060,17 @@ class DataGenerator:
                 traj_cam = self.convert_pointcloud_world_to_camera(
                     traj_world, current_pose
                 )
+                if isinstance(traj_cam, torch.Tensor): traj_cam = traj_cam.detach().cpu().numpy()
                 if traj_cam.shape[1] == 4:
                     traj_cam = traj_cam[:, :3]
 
                 # Using World Frame Background and Trajectory
                 # Note: background is the initial dense point cloud
                 bg_world = self.pcd
+                if isinstance(bg_world, torch.Tensor): bg_world = bg_world.detach().cpu().numpy()
+                
                 traj_current_world = self.camera_pose[0 : i + 1, :3, 3]
+                if isinstance(traj_current_world, torch.Tensor): traj_current_world = traj_current_world.detach().cpu().numpy()
                 if bg_world.shape[1] == 4:
                     bg_world = bg_world[:, :3]
                 if traj_current_world.shape[1] == 4:
@@ -1155,7 +1216,7 @@ class DataGenerator:
                 if i % 10 == 0:
                     print(f"Processed frame {i}/{total_frames}")
             occ_end = time.time()
-            print(f"occ gen and save cost: {occ_end - occ_start}s")
+            print(f"GPU OCC gen and save cost: {occ_end - occ_start}s")
 
     # Standard Pipeline for Occ Data Generation
     def run_pipeline(self, input_path, pcd_save=True):
@@ -1181,9 +1242,6 @@ class DataGenerator:
             input_path, pcd_save
         )
 
-        # Convert to occupancy (pcd is maintained at aligned scale)
-        self.occ_pcd = self.pcd_to_occ(self.pcd)
-
         if not pcd_save:
             return
 
@@ -1191,13 +1249,13 @@ class DataGenerator:
 
         paths = self.get_io_paths(input_path)
 
-        # Save global data
-        self.save_global_data(paths)
-
         # Execute core computation
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
-            self.compute_sequence_data()
+            self.compute_sequence_data(pcd)
         )
+        
+        # Save global data
+        self.save_global_data(paths)
 
         # Save sequence data
         print("Saving 4D Sequence Arrays...")

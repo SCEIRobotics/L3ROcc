@@ -295,18 +295,22 @@ class SimpleVideoDataGenerator(DataGenerator):
                 [[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32
             )
 
-        paths = self.get_io_paths(input_path)
-        self._copy_video_to_structure(input_path, paths["target_video_path"])
-
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
-        self.occ_pcd = self.pcd_to_occ(self.pcd)
 
         if pcd_save:
-            self.save_global_data(paths)
             print("Computing 4D sequence data...")
+            paths = self.get_io_paths(input_path)
+            self._copy_video_to_structure(input_path, paths["target_video_path"])
+
+            # Compute sequence data
             arr_4d_occ, arr_4d_mask, all_poses, all_intrinsics = (
-                self.compute_sequence_data()
+                self.compute_sequence_data(pcd)
             )
+
+            # Save global data
+            self.save_global_data(paths)
+
+            # Save sequence data
             self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
 
             # Save all metadata files

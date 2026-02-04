@@ -13,13 +13,14 @@ import scipy.sparse as sparse
 # ==============================================================================
 
 
-def get_points_from_path(file_path, frame_index=0):
+def get_points_from_path(file_path, frame_index=0,  config=None):
     """
     Universal data loader: Supports Sparse CSR, Optimized Packbits, and Legacy NPY formats.
 
     Args:
         file_path (str): Path to the .npz or .npy file.
         frame_index (int): The index of the frame to retrieve.
+        config (dict): Configuration dictionary.
 
     Returns:
         np.ndarray: An (N, 3) array of point coordinates, or None if loading fails.
@@ -48,7 +49,7 @@ def get_points_from_path(file_path, frame_index=0):
             grid_size = (dim_size, dim_size, dim_size)
         else:
             print(f"Warning: Non-cubic grid. Assuming 400x400x400...")
-            grid_size = (400, 400, 400)
+            grid_size = config["occ_size"]
 
         print(f"   -> Extracting Frame {frame_index}, Inferred Grid: {grid_size}")
         x, y, z = np.unravel_index(flat_indices, grid_size, order="C")
@@ -146,12 +147,17 @@ if __name__ == "__main__":
     # 3. Background color setting (True for Black, False for White)
     BG_BLACK = True
 
+    #4. Config
+    config_path = '/L3ROcc/configs/config.yaml'
+    with open(config_path, 'r') as stream:
+        config = yaml.safe_load(stream)
+
     # ==========================================
     # Execution Logic
     # ==========================================
 
     print(f"Loading: {FILE_PATH}")
-    points = get_points_from_path(FILE_PATH, FRAME_INDEX)
+    points = get_points_from_path(FILE_PATH, FRAME_INDEX, config)
 
     if points is None or len(points) == 0:
         print("Result is empty (0 voxels). Check frame index or file path.")

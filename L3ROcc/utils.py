@@ -310,7 +310,7 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
     return fov_voxels
 
 
-def pcd_to_voxels(pcd, voxel_size, pcd_range):
+def pcd_to_voxels(pcd, voxel_size, pc_range):
     '''
     Convert point cloud to voxel occupancy.
 
@@ -324,37 +324,71 @@ def pcd_to_voxels(pcd, voxel_size, pcd_range):
     '''
 
     # Note: Ensure correspondence between pcd xyz and pcd_range
-    occ_voxels = pcd.clone() if isinstance(pcd, torch.Tensor) else pcd.copy()
-    occ_voxels[:, 0] = occ_voxels[:, 0] - pcd_range[0]
-    occ_voxels[:, 1] = occ_voxels[:, 1] - pcd_range[1]
-    occ_voxels[:, 2] = occ_voxels[:, 2] - pcd_range[2]
-    occ_voxels[:, :3] = occ_voxels[:, :3] / voxel_size - 0.5
-    return np.floor(occ_voxels).astype(np.int32)
+    if isinstance(pcd, torch.Tensor):
+        device = pcd.device
+        dtype = pcd.dtype
+        
+        if isinstance(pc_range, torch.Tensor):
+            range_min = pc_range[:3].to(device)
+        else:
+            range_min = torch.tensor(pc_range[:3], device=device, dtype=dtype)
+            
+        # 计算索引
+        voxel_indices = torch.floor((pcd - range_min) / voxel_size).long()
+        return voxel_indices
 
+    else:
+        range_np = pc_range
+        
+        if isinstance(range_np, torch.Tensor):
+            range_np = range_np.detach().cpu().numpy()
+        if isinstance(pcd, torch.Tensor):
+            pcd_np = pcd.detach().cpu().numpy()
+        else:
+            pcd_np = pcd.copy()
+
+        pcd_np[:, 0] = (pcd_np[:, 0] - range_np[0]) / voxel_size
+        pcd_np[:, 1] = (pcd_np[:, 1] - range_np[1]) / voxel_size
+        pcd_np[:, 2] = (pcd_np[:, 2] - range_np[2]) / voxel_size
+
+        return np.floor(pcd_np).astype(np.int32)
+
+import torch
+import numpy as np
 
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
     '''
-    Convert voxel occupancy to point cloud.
+    Convert voxel indices to point cloud coordinates.
+    Compatible with both NumPy arrays and PyTorch Tensors (CPU/GPU).
 
     Args:
-        occ_voxels: Tensor of shape (D, H, W), voxel occupancy.
-        voxel_size: Float, voxel size.
-        pcd_range: List of 3 floats, [x_min, y_min, z_min] defining the range of the point cloud.
+        occ_voxels: (N, 3) Int indices of occupied voxels.
+        voxel_size: Float.
+        pcd_range: List of 3 floats [x_min, y_min, z_min].
 
     Returns:
-        pcd: Tensor of shape (N, 3), point cloud (X, Y, Z).
+        pcd: (N, 3) Float coordinates. Type matches input (Tensor -> Tensor, Numpy -> Numpy).
     '''
-    pcd = (
-        occ_voxels.clone()
-        if isinstance(occ_voxels, torch.Tensor)
-        else occ_voxels.copy()
-    )
-    pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
-    pcd[:, 0] = pcd[:, 0] + pcd_range[0]
-    pcd[:, 1] = pcd[:, 1] + pcd_range[1]
-    pcd[:, 2] = pcd[:, 2] + pcd_range[2]
-    return pcd
 
+    if isinstance(occ_voxels, torch.Tensor):
+        pcd = occ_voxels.clone().float()
+        
+        pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
+        pcd[:, 0] += pcd_range[0]
+        pcd[:, 1] += pcd_range[1]
+        pcd[:, 2] += pcd_range[2]
+        
+        return pcd
+    else:
+        pcd = occ_voxels.copy().astype(np.float32)
+        
+        pcd[:, :3] = (pcd[:, :3] + 0.5) * voxel_size
+        
+        pcd[:, 0] += pcd_range[0]
+        pcd[:, 1] += pcd_range[1]
+        pcd[:, 2] += pcd_range[2]
+        
+        return pcd
 
 def homogenize_points(
     points,

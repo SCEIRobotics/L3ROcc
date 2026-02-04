@@ -346,9 +346,6 @@ class InternNavDataGenerator(DataGenerator):
 
         self.update_meta_episodes_jsonl(scale)
 
-        # Convert to occupancy (pcd is maintained at aligned scale)
-        self.occ_pcd = self.pcd_to_occ(self.pcd)
-
         if not pcd_save:
             return
 
@@ -356,13 +353,13 @@ class InternNavDataGenerator(DataGenerator):
 
         paths = self.get_io_paths(input_path)
 
-        # Save global data
-        self.save_global_data(paths)
-
         # Execute core computation
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
-            self.compute_sequence_data()
+            self.compute_sequence_data(pcd)
         )
+        
+        # Save global data
+        self.save_global_data(paths)
 
         # Save sequence data
         print("Saving 4D Sequence Arrays...")
