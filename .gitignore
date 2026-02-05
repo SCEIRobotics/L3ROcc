@@ -33,7 +33,6 @@ resize_demo_imgs.py
 img_dir_to_video.py
 demo_gradio.py
 example.py
-pyproject.toml
 assets/*.gif
 assets/*.mp4
 assets/*.gif
