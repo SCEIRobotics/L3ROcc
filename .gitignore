@@ -35,7 +35,6 @@ demo_gradio.py
 example.py
 pyproject.toml
 assets/*.gif
-assets/*.mp4assets/*.gif
 assets/*.mp4
 assets/*.gif
 assets/*.mp4

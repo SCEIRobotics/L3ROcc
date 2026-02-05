@@ -46,7 +46,7 @@ The project utilizes **[π³](https://github.com/yyfz/Pi3)(Permutation-Equivaria
 ### 1. Clone & Install Dependencies
 #### (1). Clone the Repository
 ```bash
-git clone --recursive https://github.com/hbl-0624/L3ROcc.git
+git clone --recursive https://github.com/SCEIRobotics/L3ROcc.git
 cd L3ROcc
 ```
 #### (2). Install Python Dependencies
