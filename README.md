@@ -24,7 +24,7 @@
 </div>
 
 `L3ROcc` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
-The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for navigation learning. The processed data is formatted according to the **LeRobotDataset v2.1** specification.
+The project utilizes **[π³](https://github.com/yyfz/Pi3)(Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for navigation learning. The processed data is formatted according to the **LeRobotDataset v2.1** specification.
 
 ## ✨ Key Features
 * **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and scale-invariant globally point clouds from RGB video streams.
@@ -33,7 +33,7 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 * **4D Data Serialization**:
     * **Sparse OCC**: Utilizes Sparse CSR matrices to store temporal occupancy, significantly reducing disk usage.
     * **Packed Mask**: Implements bit-packing (via `np.packbits`) for visibility masks to optimize storage efficiency.
-* **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and `InternNav` (large-scale datasets).
+* **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and [`InternData-N1`](https://huggingface.co/datasets/InternRobotics/InternData-N1) (large-scale datasets).
 * **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
 
 ## 💡 Future Work 
@@ -46,11 +46,11 @@ The project utilizes **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 ### 1. Clone & Install Dependencies
 #### (1). Clone the Repository
 ```bash
-git clone --recursive ssh://git@10.9.46.21:9022/ch_robot/alg_group/vln/occgen.git
-cd occgen
+git clone --recursive https://github.com/hbl-0624/L3ROcc.git
+cd L3ROcc
 ```
 #### (2). Install Python Dependencies
-##### i. For Production (Generating OCC data for InternNav/LeRobot):
+##### i. For Production (Generating OCC data for InternData-N1/LeRobot):
 Python 3.10+ is recommended. Install the following dependencies:
 ```bash
 conda create -n <env> python=3.10 -y
@@ -81,7 +81,7 @@ python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save
 ```bash
 python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode run
 ```
-#### Mode C: Batch Process InternNav Dataset To process the full InternNav directory with scale alignment enabled.
+#### Mode C: Batch Process InternData-N1 Dataset To process the full InternData-N1 directory with scale alignment enabled.
 ```bash
 python tools/run_intern_nav_occ.py 
 ```
@@ -93,7 +93,7 @@ python tools/run_intern_nav_occ.py
 Located in `L3ROcc/generater/`, the project includes two core generators:
 
 * **SimpleVideoDataGenerator**: Best for individual videos; automatically builds standard directory structures including `meta/`, `videos/`, and `data/`.
-* **InternNavDataGenerator**: Designed for large-scale InternNav data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth.
+* **InternData-N1DataGenerator**: Designed for large-scale InternData-N1 data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth.
 
 ### 2. Core Configuration
 
@@ -109,7 +109,7 @@ Parameters can be tuned in `L3ROcc/configs/config.yaml`:
 
 ### 3.Dataset Structure & Contents 
 
-#### (1). InternNav Format
+#### (1). InternData-N1 Format
 The following structure is generated under each trajectory directory (e.g., trajectory_1) to ensure compatibility with robotics learning frameworks:
 
 ```
