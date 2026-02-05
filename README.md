@@ -14,10 +14,10 @@
 
 <div align="center">
   <a href="https://youtu.be/oqntFdGxhwg" target="_blank">
-    <img src="assets/demo_cover.png" width="100%" alt="L3ROcc Demo Video">
+    <img src="https://i.imgur.com/l3rocc-WKiJbKs.gif" width="100%" alt="L3ROcc Demo GIF">
   </a>
   
-  <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
+  <p><<i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</</i></p>
   <p>
     <b>🎥 <a href="https://youtu.be/oqntFdGxhwg">Watch Full Demo on YouTube</a></b>
   </p>
