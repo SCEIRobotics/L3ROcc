@@ -227,7 +227,6 @@ class DataGenerator:
         voxel_indices = torch.floor((scene_points - pc_range_min) / voxel_size).long()
 
         unique_voxel_indices = torch.unique(voxel_indices, dim=0)
-
         occ_pcd = (
             unique_voxel_indices.float() * voxel_size
             + pc_range_min
@@ -300,7 +299,8 @@ class DataGenerator:
         occ_voxels = occ_voxels[mask_in_occ_range]
 
         # Ray Casting Setup
-        max_distance = 200
+        max_distance = int(np.sqrt((self.pc_range[3]-self.pc_range[0])**2 + (self.pc_range[5]-self.pc_range[2])**2)) / self.voxel_size + 1 # 200
+ 
         ray_cast_step_size = 1.0
         ray_position = torch.zeros(
             1, 3, device=self.norm_cam_ray.device
@@ -328,14 +328,15 @@ class DataGenerator:
 
         # Initialize 3D Grid for Visibility
         camera_visible_mask_3d = torch.zeros(
-            self.config["occ_size"], device=ray_direction_norm.device
+            self.config["occ_size"], dtype=torch.uint8, device=ray_direction_norm.device
         )
         occ_voxels_3d = camera_visible_mask_3d.clone()
 
         # Mark occupied voxels in the 3D grid
-        occ_voxels_3d[
-            occ_voxels[:, 0].long(), occ_voxels[:, 1].long(), occ_voxels[:, 2].long()
-        ] = 1
+        D, H, W = self.config["occ_size"]
+        idx_1d = occ_voxels[:, 0] * (H * W) + occ_voxels[:, 1] * W + occ_voxels[:, 2]
+        idx_1d = idx_1d.long() 
+        occ_voxels_3d.view(-1).index_fill_(0, idx_1d, 1)
 
         occ_voxels_shape = torch.tensor(
             self.config["occ_size"]
@@ -365,12 +366,11 @@ class DataGenerator:
 
             # Mark visibility
             voxel_index_visible = voxel_index
-            camera_visible_mask_3d[
-                voxel_index_visible[:, 0],
-                voxel_index_visible[:, 1],
-                voxel_index_visible[:, 2],
-            ] = 1
-
+            D, H, W = self.config["occ_size"]
+            idx_1d = voxel_index_visible[:, 0] * (H * W) + voxel_index_visible[:, 1] * W + voxel_index_visible[:, 2]
+            idx_1d = idx_1d.long() 
+            camera_visible_mask_3d.view(-1).index_fill_(0, idx_1d, 1)
+ 
             # Check for collision
             occ_label_selected = occ_voxels_3d[
                 voxel_index[:, 0], voxel_index[:, 1], voxel_index[:, 2]
@@ -382,8 +382,8 @@ class DataGenerator:
 
             # Stop rays that hit
             not_hit_ray[ray_selected_index] = False
-
-        # Final Processing
+    
+        # Final Processing 
         occ_voxels_3d = (
             occ_voxels_3d * camera_visible_mask_3d
         )  # Intersection: Occupied AND Visible
@@ -393,7 +393,7 @@ class DataGenerator:
 
         camera_visible_mask = voxel2points(
             camera_visible_mask_3d, free_label=self.free_label
-        )  # All visible points (M, 3)
+        )  # All visible points (M, 3) 
 
         return occ_voxels, camera_visible_mask
 
@@ -776,8 +776,8 @@ class DataGenerator:
         # Convert pcd to points
         pcd_points_world_np = self.pcd_to_points(pcd)
         pcd_points_world = torch.from_numpy(pcd_points_world_np).float().to(device)
-
-        print(f"Processing {total_frames} frames (Simple Packed Mode)...")
+ 
+        print(f"Processing {total_frames} frames (Simple Packed Mode)...") 
         occ_start = time.time()
         for i in range(total_frames):
             current_pose_np = self.camera_pose[i]
@@ -813,7 +813,8 @@ class DataGenerator:
                     (len(valid_voxels_occ), 1), i, device=device, dtype=torch.int16
                 )
                 frame_indices = torch.cat([time_col, valid_voxels_occ.short()], dim=1)
-                all_sparse_indices_occ.append(frame_indices.cpu().numpy())
+ 
+                all_sparse_indices_occ.append(frame_indices)
 
             # --- Process Mask (Packed Bits) ---
             # Filter bounds
@@ -825,10 +826,10 @@ class DataGenerator:
                 & (cam_visible_mask[:, 2] >= 0)
                 & (cam_visible_mask[:, 2] < grid_dims[2])
             )
-            valid_voxels_cam = cam_visible_mask[valid_mask_cam].long().cpu().numpy()
-
+            valid_voxels_cam = cam_visible_mask[valid_mask_cam].int()
+ 
             # Construct single frame Bool Grid (memory intensive momentarily)
-            frame_grid = np.zeros(grid_dims, dtype=bool)
+            frame_grid = torch.zeros(grid_dims, dtype=torch.bool, device=device)
             if len(valid_voxels_cam) > 0:
                 frame_grid[
                     valid_voxels_cam[:, 0],
@@ -837,21 +838,26 @@ class DataGenerator:
                 ] = True
 
             # Compress using packbits
-            all_packed_masks.append(np.packbits(frame_grid))
-
+            all_packed_masks.append(frame_grid) 
             if i % 50 == 0:
                 print(f"  Frame {i}/{total_frames} packed.")
         occ_end = time.time()
         print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
 
         # --- Merge ---
+        # final_occ = (
+        #     np.vstack(all_sparse_indices_occ)
+        #     if all_sparse_indices_occ
+        #     else np.zeros((0, 4), dtype=np.int16)
+        # )
         final_occ = (
-            np.vstack(all_sparse_indices_occ)
+            torch.concat(all_sparse_indices_occ, dim=0).cpu().numpy()
             if all_sparse_indices_occ
             else np.zeros((0, 4), dtype=np.int16)
         )
-        final_mask_packed = np.stack(all_packed_masks)
-
+        final_mask_packed = torch.concat(all_packed_masks, dim=0).cpu().numpy()
+        final_mask_packed = np.packbits(final_mask_packed) # maybe different from before
+ 
         return final_occ, final_mask_packed, all_camera_poses, all_camera_intrinsics
 
     def update_metadata(
@@ -1034,6 +1040,7 @@ class DataGenerator:
                 pcd_cam = self.convert_pointcloud_world_to_camera(
                     pcd_points, current_pose
                 )  # Shape: (-1, 3) in meters
+ 
                 if isinstance(pcd_cam, torch.Tensor):
                     pcd_cam = pcd_cam.detach().cpu().numpy()
 
@@ -1288,3 +1295,50 @@ class DataGenerator:
         # Save sequence data
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
+
+
+if __name__ == "__main__":
+    occ_pcd_cam = np.load("./tmp.npy")
+    occ_pcd_cam = torch.tensor(occ_pcd_cam, dtype=torch.float32, device="cuda")
+    generetor = DataGenerator()
+    generetor.norm_cam_ray = torch.tensor(np.load("./cam_ray.npy"), dtype=torch.float32, device="cuda")
+    st = time.time()
+
+    for i in range(100):
+        _, _ = generetor.check_visual_occ(occ_pcd_cam)
+    et = time.time()
+ 
+
+
+
+    def fill_time():
+        occ_3d = torch.rand((400, 400, 400)).cuda()
+        occ_3d[occ_3d >= 0.8] = 1
+        occ_3d[occ_3d < 0.8] = 0
+
+        occ_points = voxel2points(occ_3d) 
+        print(occ_points)
+        occ_points = occ_points.int()
+        tpl = torch.zeros_like(occ_3d)
+        import time
+        loop_number = 500
+        st = time.time()
+        for i in range(loop_number):
+            tpl[occ_points[:, 0], occ_points[:, 1], occ_points[:, 2]] = 1
+        et = time.time()
+        print(f"index: {et - st}s")
+        # occ_points = occ_points.contiguous()
+        tpl = tpl.to(torch.uint8)
+        for i in range(loop_number):
+            # indices = (occ_points[:, 0], occ_points[:, 1], occ_points[:, 2])
+            # values = torch.tensor(1.0, device=tpl.device)
+            # tpl.index_put_(indices, values)
+
+            D, H, W = tpl.shape 
+            idx_1d = occ_points[:, 0] * (H * W) + occ_points[:, 1] * W + occ_points[:, 2]
+            idx_1d = idx_1d.long() 
+            tpl.view(-1).index_fill_(0, idx_1d, 1)
+            # tpl.view(-1)[idx_1d] = True
+        et2 = time.time()
+        print(f"lat: {et2 - et}s")
+        print("tpl type: ", tpl.dtype)

@@ -352,12 +352,7 @@ def pcd_to_voxels(pcd, voxel_size, pc_range):
         pcd_np[:, 2] = (pcd_np[:, 2] - range_np[2]) / voxel_size
 
         return np.floor(pcd_np).astype(np.int32)
-
-
-import torch
-import numpy as np
-
-
+ 
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
     """
     Convert voxel indices to point cloud coordinates.
