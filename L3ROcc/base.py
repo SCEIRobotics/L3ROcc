@@ -267,7 +267,7 @@ class DataGenerator:
         )  # Extract vertices (denser representation)
 
         return scene_points
-
+ 
     def check_visual_occ(self, occ_pcd_cam):
         """
         Performs Ray Casting to check which occupancy voxels are visible from the current camera pose.
@@ -316,19 +316,10 @@ class DataGenerator:
 
         # Convert ray origin to voxel coordinates
         ray_position = (ray_position - pc_range_tensor) / self.voxel_size
-
-        # Initialize Ray State
-        not_hit_ray = torch.ones(
-            len(ray_direction_norm), device=ray_direction_norm.device
-        ).bool()  # True = Ray is still flying
-
-        ray_index_all = torch.arange(
-            len(ray_direction_norm), device=ray_direction_norm.device
-        )
-
+ 
         # Initialize 3D Grid for Visibility
         camera_visible_mask_3d = torch.zeros(
-            self.config["occ_size"], dtype=torch.uint8, device=ray_direction_norm.device
+            self.config["occ_size"], dtype=torch.bool, device=ray_direction_norm.device
         )
         occ_voxels_3d = camera_visible_mask_3d.clone()
 
@@ -337,64 +328,44 @@ class DataGenerator:
         idx_1d = occ_voxels[:, 0] * (H * W) + occ_voxels[:, 1] * W + occ_voxels[:, 2]
         idx_1d = idx_1d.long() 
         occ_voxels_3d.view(-1).index_fill_(0, idx_1d, 1)
-
-        occ_voxels_shape = torch.tensor(
-            self.config["occ_size"]
-        ).cuda()  # Map boundaries
-        zeros_3 = torch.zeros_like(occ_voxels_shape)
-
-        # Begin Ray Marching
-        for step in range(int(max_distance / ray_cast_step_size) + 1):
-            if not (not_hit_ray.any() and True):
-                print(f"all rays hit the occupied voxel in step {step}!")
-                break
-
-            ray_position = (
-                ray_position + ray_direction_norm * ray_cast_step_size
-            )  # March forward
-            voxel_coords = torch.floor(ray_position).int()
-
-            # Check bounds
-            coord_valid = (voxel_coords >= zeros_3) & (voxel_coords < occ_voxels_shape)
-            position_valid = not_hit_ray & coord_valid.all(
-                dim=1
-            )  # Valid if: 1. Not hit yet, 2. Within bounds
-
-            # Extract valid indices
-            voxel_index = voxel_coords[position_valid]
-            ray_selected_index = ray_index_all[position_valid]
-
-            # Mark visibility
-            voxel_index_visible = voxel_index
-            D, H, W = self.config["occ_size"]
-            idx_1d = voxel_index_visible[:, 0] * (H * W) + voxel_index_visible[:, 1] * W + voxel_index_visible[:, 2]
-            idx_1d = idx_1d.long() 
-            camera_visible_mask_3d.view(-1).index_fill_(0, idx_1d, 1)
  
-            # Check for collision
-            occ_label_selected = occ_voxels_3d[
-                voxel_index[:, 0], voxel_index[:, 1], voxel_index[:, 2]
-            ]
-            occ_not_free = occ_label_selected != self.free_label
+        # Begin Ray Marching
+        steps = torch.arange(0, max_distance, ray_cast_step_size, device=self.norm_cam_ray.device)
+        ray_positions = ray_position.unsqueeze(0) + ray_direction_norm.unsqueeze(1) * steps.unsqueeze(0).unsqueeze(-1)
+        voxel_coords = torch.floor(ray_positions).long()
+        D, H, W = self.config["occ_size"]
+        valid_mask = (voxel_coords[..., 0] >= 0) & (voxel_coords[..., 0] < D) & \
+                    (voxel_coords[..., 1] >= 0) & (voxel_coords[..., 1] < H) & \
+                    (voxel_coords[..., 2] >= 0) & (voxel_coords[..., 2] < W)
 
-            # Identify rays that hit an obstacle
-            ray_selected_index = ray_selected_index[occ_not_free]
+        flat_coords = voxel_coords[..., 0] * (H * W) + voxel_coords[..., 1] * W + voxel_coords[..., 2]
+        occ_flat = occ_voxels_3d.view(-1)
+        sampled_occ = torch.where(valid_mask, occ_flat[flat_coords.clamp(0, occ_flat.size(0)-1)], 
+                                torch.tensor(0, device=occ_flat.device, dtype=torch.bool)) # 不补0没法组matrixs
 
-            # Stop rays that hit
-            not_hit_ray[ray_selected_index] = False
-    
-        # Final Processing 
-        occ_voxels_3d = (
-            occ_voxels_3d * camera_visible_mask_3d
-        )  # Intersection: Occupied AND Visible
-        occ_voxels = voxel2points(
-            occ_voxels_3d, free_label=self.free_label
-        )  # Convert back to coordinates (N, 3)
+        # The first occurrence of 1 on each ray indicates the starting position where the voxel becomes occluded, excluding the voxel itself.
+        hit_mask = (sampled_occ > 0).cumsum(dim=1) > 0 
+        hit_mask[:, 1:] = hit_mask[:, :-1]
+ 
+        visible_indices = flat_coords[valid_mask & ~hit_mask] 
+        camera_visible_mask_3d.view(-1).index_fill_(0, visible_indices, 1)
+        occ_voxels_3d = occ_voxels_3d * camera_visible_mask_3d
 
-        camera_visible_mask = voxel2points(
-            camera_visible_mask_3d, free_label=self.free_label
-        )  # All visible points (M, 3) 
+        # Convert back to coordinates (N, 3)
+        # occ_voxels = voxel2points(
+        #     occ_voxels_3d, free_label=self.free_label
+        # )  
+        # camera_visible_mask = voxel2points(
+        #     camera_visible_mask_3d, free_label=self.free_label
+        # )   
+         
+        occ_voxels = torch.nonzero(occ_voxels_3d)
+        values = occ_voxels_3d[occ_voxels[:, 0], occ_voxels[:, 1], occ_voxels[:, 2]]
+        occ_voxels = torch.cat([occ_voxels, values.unsqueeze(1)], dim=1)
 
+        camera_visible_mask = torch.nonzero(camera_visible_mask_3d)
+        camera_visible_mask = torch.cat([camera_visible_mask, torch.ones_like(camera_visible_mask[:, :1])], dim=1)
+ 
         return occ_voxels, camera_visible_mask
 
     def convert_pointcloud_world_to_camera(self, points_world, T_cw):
@@ -855,9 +826,11 @@ class DataGenerator:
             if all_sparse_indices_occ
             else np.zeros((0, 4), dtype=np.int16)
         )
-        final_mask_packed = torch.concat(all_packed_masks, dim=0).cpu().numpy()
-        final_mask_packed = np.packbits(final_mask_packed) # maybe different from before
- 
+        final_mask_packed = torch.stack(all_packed_masks, dim=0)
+        final_mask_packed = final_mask_packed.reshape(final_mask_packed.shape[0], -1).cpu().numpy()
+        final_mask_packed = np.packbits(final_mask_packed, axis=1) 
+        # import pdb
+        # pdb.set_trace()
         return final_occ, final_mask_packed, all_camera_poses, all_camera_intrinsics
 
     def update_metadata(

@@ -289,9 +289,9 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
     """
     d, h, w = pred_occ.shape
 
-    x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=pred_occ.dtype)
-    y = torch.linspace(0, h - 1, h, device=pred_occ.device, dtype=pred_occ.dtype)
-    z = torch.linspace(0, w - 1, w, device=pred_occ.device, dtype=pred_occ.dtype)
+    x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=torch.int32)
+    y = torch.linspace(0, h - 1, h, device=pred_occ.device, dtype=torch.int32)
+    z = torch.linspace(0, w - 1, w, device=pred_occ.device, dtype=torch.int32)
 
     X, Y, Z = torch.meshgrid(x, y, z)
 
