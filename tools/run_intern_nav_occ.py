@@ -127,13 +127,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="/mnt/data_ssd/share/data/InternData-N1/vln_n1/traj_data",
+        default="data/examples/small_vln_n1/traj_data",
         help="Directory to load dataset",
     )
     parser.add_argument(
         "--output_root",
         type=str,
-        default="/mnt/data_ssd/share/data/InternData-N1/vln_n1/traj_data",
+        default="data/examples/small_vln_n1/traj_data",
         help="Directory to save outputs",
     )
 
