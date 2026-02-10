@@ -194,7 +194,7 @@ This project is built upon the following excellent works:
 
 ## 📜 Citation
 
-If you find our work useful, please consider citing:
+If you find this project useful for your research, please consider citing the foundational works mentioned in the **Acknowledgements**:
 
 ```bibtex
 @misc{wang2025pi3,
@@ -205,6 +205,27 @@ If you find our work useful, please consider citing:
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2507.13347}, 
+}
+
+@article{tian2023occ3d,
+  title={Occ3D: A Large-Scale 3D Occupancy Prediction Benchmark for Autonomous Driving},
+  author={Tian, Xiaoyu and Jiang, Tao and Yun, Longfei and Wang, Yue and Wang, Yilun and Zhao, Hang},
+  journal={arXiv preprint arXiv:2304.14365},
+  year={2023}
+}
+
+@article{wei2023surroundocc, 
+      title={SurroundOcc: Multi-Camera 3D Occupancy Prediction for Autonomous Driving}, 
+      author={Yi Wei and Linqing Zhao and Wenzhao Zheng and Zheng Zhu and Jie Zhou and Jiwen Lu},
+      journal={arXiv preprint arXiv:2303.09551},
+      year={2023}
+}
+
+@misc{interndata_n1,
+  title={InternData-N1 Dataset},
+  author={InternData-N1 Dataset contributors},
+  howpublished={\url{https://huggingface.co/datasets/InternRobotics/InternData-N1}},
+  year={2025}
 }
 ```
 
