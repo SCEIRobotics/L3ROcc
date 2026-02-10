@@ -247,26 +247,58 @@ class DataGenerator:
         """
         # Convert to Open3D PointCloud object
         pcd = pcd.cpu().numpy() if isinstance(pcd, torch.Tensor) else pcd
-        point_cloud_original = o3d.geometry.PointCloud()
-        with_normal2 = o3d.geometry.PointCloud()
-        point_cloud_original.points = o3d.utility.Vector3dVector(pcd)
-        with_normal = preprocess(point_cloud_original, self.config, normals=True)
-        with_normal2.points = o3d.utility.Vector3dVector(with_normal.points)
-        with_normal2.normals = with_normal.normals
+        pcd = pcd.astype(np.float64)
+        valid_mask = np.isfinite(pcd).all(axis=1)
+        if np.sum(valid_mask) < len(pcd):
+            print(f"[Warning] Removed {len(pcd) - np.sum(valid_mask)} NaN/Inf points.")
+            pcd = pcd[valid_mask]
+        if len(pcd) < 100:
+            print("[Error] Too few points for reconstruction! Returning raw points.")
+            return pcd
 
-        # Create mesh to densify the surface
-        mesh, _ = create_mesh_from_map(
-            None,
-            self.config["depth"],
-            self.config["n_threads"],
-            self.config["min_density"],
-            with_normal2,
-        )
-        scene_points = np.asarray(
-            mesh.vertices, dtype=float
-        )  # Extract vertices (denser representation)
+        try:
+            point_cloud_original = o3d.geometry.PointCloud()
+            point_cloud_original.points = o3d.utility.Vector3dVector(pcd)
 
-        return scene_points
+            with_normal = preprocess(point_cloud_original, self.config, normals=True)
+
+            if with_normal.has_normals():
+                normals = np.asarray(with_normal.normals)
+                if np.isnan(normals).any():
+                    # print("[Warning] NaN detected in normals! Cleaning...")
+                    valid_normal_mask = np.isfinite(normals).all(axis=1)
+                    clean_points = np.asarray(with_normal.points)[valid_normal_mask]
+                    clean_normals = normals[valid_normal_mask]
+
+                    with_normal2 = o3d.geometry.PointCloud()
+                    with_normal2.points = o3d.utility.Vector3dVector(clean_points)
+                    with_normal2.normals = o3d.utility.Vector3dVector(clean_normals)
+                else:
+                    with_normal2 = with_normal
+            else:
+                return pcd
+
+            mesh, _ = create_mesh_from_map(
+                None,
+                self.config["depth"],
+                self.config["n_threads"],
+                self.config["min_density"],
+                with_normal2,
+            )
+            scene_points = np.asarray(mesh.vertices, dtype=float)
+
+            if len(scene_points) == 0:
+                return pcd
+
+            return scene_points
+
+        except:
+            print(
+                f"[Error] Mesh reconstruction failed: {e}. Returning original points."
+            )
+            import pdb
+            pdb.set_trace()
+            return pcd
  
     def check_visual_occ(self, occ_pcd_cam):
         """

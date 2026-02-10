@@ -33,6 +33,21 @@ class InternNavDataGenerator(DataGenerator):
         """
         super().__init__(config_path, save_dir, model_dir)
 
+    def check_processing_status(self, input_path, overwrite=False):
+        if overwrite:
+            print(f"[Status] Force Overwrite enabled. Running '{os.path.basename(input_path)}'.")
+            return True
+
+        paths = self.get_io_paths(input_path)
+        final_target = paths["mask_seq"] 
+
+        if os.path.exists(final_target):
+            print(f"[Status] Found '{os.path.basename(final_target)}'. Skipping.")
+            return False 
+        
+        return True 
+    
+
     def get_io_paths(self, input_path):
         """
         Generates the directory structure and file paths required for dataset outputs.
@@ -318,7 +333,7 @@ class InternNavDataGenerator(DataGenerator):
                 print(f"Error updating {file_path}: {e}")
                 break
 
-    def run_pipeline(self, input_path, pcd_save=True):
+    def run_pipeline(self, input_path, pcd_save=True, overwrite=False):
         """
         Executes the full data generation pipeline:
         Reconstruction -> GT Scale Alignment -> Global Storage -> Sequence Calculation -> Metadata Update
@@ -330,6 +345,10 @@ class InternNavDataGenerator(DataGenerator):
         Returns:
             None
         """
+        #Check Status
+        if not self.check_processing_status(input_path, overwrite=overwrite):
+            return
+
         # Initialization
         if self.camera_intric is None:
             self.camera_intric = np.array(

@@ -109,7 +109,7 @@ def run_dataset_pipeline(args):
 
             # D. Run the core pipeline
             # 'pcd_save=True' enables the saving logic
-            generator.run_pipeline(input_path_for_gen, pcd_save=True)
+            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = False)
 
             print("Processing successful!")
 

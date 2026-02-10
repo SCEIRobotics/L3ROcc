@@ -28,6 +28,8 @@ ckpts
 /utils/calc
 /all_outputs
 /small_vln_n1_4
+/small_vln_n1_5
+/small_vln_n1_6
 examples
 resize_demo_imgs.py
 img_dir_to_video.py
