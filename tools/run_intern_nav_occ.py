@@ -34,6 +34,9 @@ def run_dataset_pipeline(args):
     # Root directory for saving results
     output_root = args.output_root
 
+    # Whether to overwrite existing files
+    overwrite = args.overwrite
+
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
 
@@ -109,7 +112,7 @@ def run_dataset_pipeline(args):
 
             # D. Run the core pipeline
             # 'pcd_save=True' enables the saving logic
-            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = True)
+            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = overwrite)
 
             print("Processing successful!")
 
@@ -135,6 +138,13 @@ if __name__ == "__main__":
         type=str,
         default="data/examples/small_vln_n1/traj_data",
         help="Directory to save outputs",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        type=bool,
+        default=True,
+        help="Overwrite existing files",
     )
 
     args = parser.parse_args()

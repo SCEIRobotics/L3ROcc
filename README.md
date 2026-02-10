@@ -34,7 +34,6 @@ This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
     * **Packed Mask**: Implements bit-packing (via `np.packbits`) for visibility masks to optimize storage efficiency.
 * **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and [`InternData-N1`](https://huggingface.co/datasets/InternRobotics/InternData-N1) (large-scale datasets).
 * **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
-* **Efficient Status Check**: Lightweight check via `check_processing_status(input_path, overwrite=False)` – reprocess if `overwrite=True`, skip if `mask_sequence.npz` exists, else process.
 
 ## 💡 Future Work 
 - [ ] **Semantic Point Cloud**: Integrate semantic segmentation, and instance segmentation to enhance reconstruction quality.
@@ -75,16 +74,21 @@ Place the $\pi^3$ model weights (model.safetensors) and configuration files in t
 ### 3. Run Example （The pipeline supports three primary modes）:
 #### Mode A: Generate Visualized Dynamic Video Use this to create side-by-side comparison videos from your own footage with history frames.
 ```bash
-python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode visual
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode visual 
 ```
 #### Mode B: Generate LeRobot-compatible Data Use this to generate the standard dataset structure for model training.
 ```bash
 python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode run
 ```
 #### Mode C: Batch Process InternData-N1 Dataset To process the full InternData-N1 directory with scale alignment enabled.
+This mode supports **breakpoint resumption** with the following logic:
+- `mask_sequence.npz` (final result file) exists: Skip processing and continue with the next trajectory.
+- `overwrite=True`: Force reprocessing and overwrite existing files.
+- Otherwise: Proceed with processing.
 ```bash
-python tools/run_intern_nav_occ.py 
+python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data --output_root data/examples/small_vln_n1_4/traj_data --overwrite True
 ```
+
 
 ## 🛠️ Pipeline Details
 
