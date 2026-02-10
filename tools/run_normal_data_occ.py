@@ -55,7 +55,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video_path",
         type=str,
-        default="data/examples/office.mp4",
+        default="/mnt/data/huangbinling/project/occgen/small_vln_n1_4/traj_data/matterport3d_zed/1LXtFkjw3qL/trajectory_6/videos/chunk-000/observation.video.trajectory/episode_000000.mp4",
         help="Path to the video file to process.",
     )
     parser.add_argument(

@@ -109,7 +109,7 @@ def run_dataset_pipeline(args):
 
             # D. Run the core pipeline
             # 'pcd_save=True' enables the saving logic
-            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = False)
+            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = True)
 
             print("Processing successful!")
 
@@ -127,13 +127,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data/",
+        default="/mnt/data_ssd/share/data/InternData-N1/vln_n1/traj_data",
         help="Directory to load dataset",
     )
     parser.add_argument(
         "--output_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data/",
+        default="/mnt/data_ssd/share/data/InternData-N1/vln_n1/traj_data",
         help="Directory to save outputs",
     )
 

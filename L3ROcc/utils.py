@@ -879,6 +879,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
             frame_idx += 1
         cap.release()
         all_frames = frame_idx
+        print(f"Total frames loaded from video: {all_frames}")
     else:
         raise ValueError(
             f"Unsupported path. Must be a directory or a .mp4 file: {path}"

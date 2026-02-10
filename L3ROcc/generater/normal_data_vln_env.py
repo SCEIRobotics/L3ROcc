@@ -108,17 +108,17 @@ class SimpleVideoDataGenerator(DataGenerator):
 
         data_dict = {
             #'episode_id': np.array([self.episode_id] * total_frames, dtype=np.int64),
-            #'frame_id': np.arange(total_frames, dtype=np.int64),
+            #,
             "index": np.arange(total_frames, dtype=np.int64),  # alias for frame_id
-            #'timestamp': np.linspace(0, total_frames / self.fps, total_frames, dtype=np.float32),
-            #'episode_index': np.zeros(total_frames, dtype=np.int64),
-            #'task_index': np.zeros(total_frames, dtype=np.int64), # Dummy task index
-            # 3D Data (Keep as list of arrays for now to preserve shape)
             "observation.camera_intrinsic": all_camera_intrinsics,
             "observation.camera_extrinsic": all_camera_poses,
             "action": all_camera_poses,  # Assuming action is pose
             "observation.camera_extrinsic_occ": all_camera_poses,
             "observation.camera_intrinsic_occ": all_camera_intrinsics,
+            'timestamp': np.linspace(0, total_frames / self.fps, total_frames, dtype=np.float32),
+            'frame_index': np.arange(total_frames, dtype=np.int64),
+            'episode_index': np.zeros(total_frames, dtype=np.int64),
+            'task_index': np.zeros(total_frames, dtype=np.int64), # Dummy task index
         }
 
         # --- 1. Save Parquet ---
@@ -257,12 +257,12 @@ class SimpleVideoDataGenerator(DataGenerator):
         episode_entry = {
             "episode_index": self.episode_id,
             "tasks": [0],
-            # "scene_id": self.scene_id,
-            # "trajectory_id": self.default_traj_name,
-            # "episode_chunk": 0,
-            # "video_key": "observation.video.trajectory",
-            # "data_path": rel_data_path,
-            # "video_path": rel_video_path,
+            "scene_id": self.scene_id,
+            "trajectory_id": self.default_traj_name,
+            "episode_chunk": 0,
+            "video_key": "observation.video.trajectory",
+            "data_path": rel_data_path,
+            "video_path": rel_video_path,
             "length": length,
             "scale": 1.0,
         }
