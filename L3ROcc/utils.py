@@ -289,9 +289,9 @@ def voxel2points(pred_occ, mask_camera=None, free_label=0):
     """
     d, h, w = pred_occ.shape
 
-    x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=pred_occ.dtype)
-    y = torch.linspace(0, h - 1, h, device=pred_occ.device, dtype=pred_occ.dtype)
-    z = torch.linspace(0, w - 1, w, device=pred_occ.device, dtype=pred_occ.dtype)
+    x = torch.linspace(0, d - 1, d, device=pred_occ.device, dtype=torch.int32)
+    y = torch.linspace(0, h - 1, h, device=pred_occ.device, dtype=torch.int32)
+    z = torch.linspace(0, w - 1, w, device=pred_occ.device, dtype=torch.int32)
 
     X, Y, Z = torch.meshgrid(x, y, z)
 
@@ -352,12 +352,7 @@ def pcd_to_voxels(pcd, voxel_size, pc_range):
         pcd_np[:, 2] = (pcd_np[:, 2] - range_np[2]) / voxel_size
 
         return np.floor(pcd_np).astype(np.int32)
-
-
-import torch
-import numpy as np
-
-
+ 
 def voxels_to_pcd(occ_voxels, voxel_size, pcd_range):
     """
     Convert voxel indices to point cloud coordinates.

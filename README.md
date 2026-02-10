@@ -23,7 +23,7 @@
 </div>
 
 `L3ROcc` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
-The project utilizes **[π³](https://github.com/yyfz/Pi3)(Permutation-Equivariant Visual Geometry Learning)** as its underlying reconstruction engine and provides a fully automated data labeling and alignment pipeline tailored for navigation learning. The processed data is formatted according to the **LeRobotDataset v2.1** specification.
+This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its foundational reconstruction engine, and implements a fully automated pipeline for data labeling and alignment that is customized for navigation learning tasks. All processed data adheres to the **LeRobotDataset v2.1** specification. In practical testing, processing a 16-second video segment using this pipeline requires roughly 15 seconds to produce occupancy (occ) and mask data.
 
 ## ✨ Key Features
 * **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and scale-invariant globally point clouds from RGB video streams.
@@ -34,6 +34,10 @@ The project utilizes **[π³](https://github.com/yyfz/Pi3)(Permutation-Equivaria
     * **Packed Mask**: Implements bit-packing (via `np.packbits`) for visibility masks to optimize storage efficiency.
 * **Multi-Dataset Adaptation**: Built-in generators for both `SimpleVideo` (single video) and [`InternData-N1`](https://huggingface.co/datasets/InternRobotics/InternData-N1) (large-scale datasets).
 * **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
+* **Efficient Status Check**: Lightweight check via `check_processing_status(input_path, overwrite=False)`:
+    1. `overwrite=True` → `True` (reprocess);
+    2. `mask_sequence.npz` exists → `False` (skip);
+    3. Else → `True` (process).
 
 ## 💡 Future Work 
 - [ ] **Semantic Point Cloud**: Integrate semantic segmentation, and instance segmentation to enhance reconstruction quality.
@@ -98,7 +102,7 @@ Located in `L3ROcc/generater/`, the project includes two core generators:
 
 Parameters can be tuned in `L3ROcc/configs/config.yaml`:
 
-* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]`, which defines the effective field of view.
+* **`pc_range`**: Spatial clipping and perception range for point cloud `[x_min, y_min, z_min, x_max, y_max, z_max]`. Where x is left-right direction, y is height direction (-y for upward), and z is front-back direction.
 * **`voxel_size`**: Base size for occupancy voxels (e.g., 0.02m), which is directly related to the sparsity of the occupancy voxel map.
 * **`occ_size`**: Number of voxel grids in each spatial dimension, derived from `(pc_range_max - pc_range_min) / voxel_size` with no independent configuration.
 * **`interval`**: Frame sampling interval for video processing.
