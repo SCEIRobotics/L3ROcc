@@ -192,7 +192,7 @@ This project is built upon the following excellent works:
 
 ## 🐼 Core Contributors
 
-**Nianjin Ye**<sup>1*</sup>([GitHub](https://github.com/CallMeFrozenBanana)), **Binling Huang**<sup>12*</sup>([GitHub](https://github.com/hbl-0624)), **Hao Xu**<sup>3</sup>([GitHub](https://hxwork.github.io/))
+**Nianjin Ye**<sup>1*</sup>([GitHub](https://github.com/CallMeFrozenBanana)), **Binling Huang**<sup>12*</sup>([GitHub](https://github.com/hbl-0624)),**Xi Yang**<sup>1</sup>([GitHub](https://github.com/kingkids)),**Hao Xu**<sup>3</sup>([GitHub](https://hxwork.github.io/))
 
 <sup>1</sup>Sichuan Embodied Intelligence Robot Training Base     <sup>2</sup>UESTC     <sup>3</sup>CUHK     <sup>*</sup> (Equal Contribution)
 
