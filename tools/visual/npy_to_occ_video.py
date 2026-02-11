@@ -12,7 +12,6 @@ import yaml
 # This script converts a sequence of occ_only_cam.npy files into a video.
 
 
-
 def create_low_sat_gradient():
     """
     Creates a 256-color low-saturation gradient lookup table (LUT)

@@ -35,18 +35,19 @@ class InternNavDataGenerator(DataGenerator):
 
     def check_processing_status(self, input_path, overwrite=False):
         if overwrite:
-            print(f"[Status] Force Overwrite enabled. Running '{os.path.basename(input_path)}'.")
+            print(
+                f"[Status] Force Overwrite enabled. Running '{os.path.basename(input_path)}'."
+            )
             return True
 
         paths = self.get_io_paths(input_path)
-        final_target = paths["mask_seq"] 
+        final_target = paths["mask_seq"]
 
         if os.path.exists(final_target):
             print(f"[Status] Found '{os.path.basename(final_target)}'. Skipping.")
-            return False 
-        
-        return True 
-    
+            return False
+
+        return True
 
     def get_io_paths(self, input_path):
         """
@@ -333,7 +334,7 @@ class InternNavDataGenerator(DataGenerator):
                 print(f"Error updating {file_path}: {e}")
                 break
 
-    def run_pipeline(self, input_path, pcd_save=True, overwrite=False):
+    def run_pipeline(self, input_path, pcd_save=True, overwrite=False, mesh=False):
         """
         Executes the full data generation pipeline:
         Reconstruction -> GT Scale Alignment -> Global Storage -> Sequence Calculation -> Metadata Update
@@ -345,16 +346,10 @@ class InternNavDataGenerator(DataGenerator):
         Returns:
             None
         """
-        #Check Status
+        # Check Status
         if not self.check_processing_status(input_path, overwrite=overwrite):
             return
-
-        # Initialization
-        if self.camera_intric is None:
-            self.camera_intric = np.array(
-                [[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32
-            )
-
+            
         # 3D Reconstruction
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
 
@@ -374,7 +369,7 @@ class InternNavDataGenerator(DataGenerator):
 
         # Execute core computation
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
-            self.compute_sequence_data(pcd)
+            self.compute_sequence_data(pcd, mesh=mesh)
         )
 
         # Save global data

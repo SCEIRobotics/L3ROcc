@@ -2,7 +2,7 @@
     "codebase_version": "v2.1",
     "robot_type": "unknown",
     "total_episodes": 1,
-    "total_frames": 156,
+    "total_frames": 104,
     "total_tasks": 2,
     "total_videos": 0,
     "total_chunks": 1,

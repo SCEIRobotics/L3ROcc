@@ -34,8 +34,14 @@ def run_dataset_pipeline(args):
     # Root directory for saving results
     output_root = args.output_root
 
+    # Whether to save files
+    pcd_save = args.pcd_save
+
     # Whether to overwrite existing files
     overwrite = args.overwrite
+
+    # Whether to use mesh instead of origin point cloud
+    mesh = args.mesh
 
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
@@ -112,7 +118,9 @@ def run_dataset_pipeline(args):
 
             # D. Run the core pipeline
             # 'pcd_save=True' enables the saving logic
-            generator.run_pipeline(input_path_for_gen, pcd_save=True, overwrite = overwrite)
+            generator.run_pipeline(
+                input_path_for_gen, pcd_save=pcd_save, overwrite=overwrite, mesh=mesh
+            )
 
             print("Processing successful!")
 
@@ -130,21 +138,35 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data",
+        default="data/examples/small_vln_n1/traj_data/",
         help="Directory to load dataset",
     )
     parser.add_argument(
         "--output_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data",
+        default="data/examples/small_vln_n1/traj_data/",
         help="Directory to save outputs",
+    )
+
+    parser.add_argument(
+        "--pcd_save",
+        type=bool,
+        default=True,
+        help="Save files",
     )
 
     parser.add_argument(
         "--overwrite",
         type=bool,
-        default=True,
+        default=False,
         help="Overwrite existing files",
+    )
+
+    parser.add_argument(
+        "--mesh",
+        type=bool,
+        default=False,
+        help="Use mesh instead of origin point cloud",
     )
 
     args = parser.parse_args()

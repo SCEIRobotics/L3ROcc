@@ -30,6 +30,12 @@ def run_normal_data_pipeline(args):
     # Path to the configuration file (YAML)
     config_path = os.path.join(project_root, "L3ROcc", "configs", "config.yaml")
 
+    # Whether to save files
+    pcd_save = args.pcd_save
+
+    # Whether to use mesh instead of origin point cloud
+    mesh = args.mesh
+
     # ================= 2. Initialization  =================
     print(f"Initializing SimpleVideoDataGenerator with config: {config_path}")
     generator = SimpleVideoDataGenerator(config_path, save_dir, model_dir)
@@ -39,12 +45,12 @@ def run_normal_data_pipeline(args):
     # [Option 1] visual_pipeline:
     # Generates files required specifically for visualization purposes.
     if args.mode == "visual":
-        generator.visual_pipeline(args.video_path, pcd_save=True)
+        generator.visual_pipeline(args.video_path, pcd_save=pcd_save)
 
     # [Option 2] run_pipeline:
     # Generates files required for the LeRobot format and standard dataset structure.
     if args.mode == "run":
-        generator.run_pipeline(args.video_path, pcd_save=True)
+        generator.run_pipeline(args.video_path, pcd_save=pcd_save, mesh=mesh)
 
 
 if __name__ == "__main__":
@@ -69,6 +75,19 @@ if __name__ == "__main__":
         type=str,
         default="run",
         help="Mode to run the pipeline in. Options: 'visual' or 'run'.",
+    )
+
+    parser.add_argument(
+        "--pcd_save",
+        type=bool,
+        default=True,
+        help="Save result files",
+    )
+    parser.add_argument(
+        "--mesh",
+        type=bool,
+        default=False,
+        help="Use mesh instead of origin point cloud",
     )
 
     args = parser.parse_args()

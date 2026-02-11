@@ -74,11 +74,11 @@ Place the $\pi^3$ model weights (model.safetensors) and configuration files in t
 ### 3. Run Example （The pipeline supports three primary modes）:
 #### Mode A: Generate Visualized Dynamic Video Use this to create side-by-side comparison videos from your own footage with history frames.
 ```bash
-python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode visual 
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --pcd_save True --mode visual --mesh False
 ```
 #### Mode B: Generate LeRobot-compatible Data Use this to generate the standard dataset structure for model training.
 ```bash
-python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --mode run
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --pcd_save True --mode run --mesh False
 ```
 #### Mode C: Batch Process InternData-N1 Dataset To process the full InternData-N1 directory with scale alignment enabled.
 This mode supports **breakpoint resumption** with the following logic:
@@ -86,7 +86,7 @@ This mode supports **breakpoint resumption** with the following logic:
 - `overwrite=True`: Force reprocessing and overwrite existing files.
 - Otherwise: Proceed with processing.
 ```bash
-python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data --output_root data/examples/small_vln_n1_4/traj_data --overwrite True
+python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data --output_root data/examples/small_vln_n1_4/traj_data --pcd_save True --overwrite False --mesh False
 ```
 
 

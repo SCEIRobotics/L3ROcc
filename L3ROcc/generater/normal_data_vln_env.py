@@ -108,17 +108,19 @@ class SimpleVideoDataGenerator(DataGenerator):
 
         data_dict = {
             #'episode_id': np.array([self.episode_id] * total_frames, dtype=np.int64),
-            #,
+            # ,
             "index": np.arange(total_frames, dtype=np.int64),  # alias for frame_id
             "observation.camera_intrinsic": all_camera_intrinsics,
             "observation.camera_extrinsic": all_camera_poses,
             "action": all_camera_poses,  # Assuming action is pose
             "observation.camera_extrinsic_occ": all_camera_poses,
             "observation.camera_intrinsic_occ": all_camera_intrinsics,
-            'timestamp': np.linspace(0, total_frames / self.fps, total_frames, dtype=np.float32),
-            'frame_index': np.arange(total_frames, dtype=np.int64),
-            'episode_index': np.zeros(total_frames, dtype=np.int64),
-            'task_index': np.zeros(total_frames, dtype=np.int64), # Dummy task index
+            "timestamp": np.linspace(
+                0, total_frames / self.fps, total_frames, dtype=np.float32
+            ),
+            "frame_index": np.arange(total_frames, dtype=np.int64),
+            "episode_index": np.zeros(total_frames, dtype=np.int64),
+            "task_index": np.zeros(total_frames, dtype=np.int64),  # Dummy task index
         }
 
         # --- 1. Save Parquet ---
@@ -288,12 +290,8 @@ class SimpleVideoDataGenerator(DataGenerator):
         except Exception as e:
             print(f"Warning: Failed to copy video file: {e}")
 
-    def run_pipeline(self, input_path, pcd_save=True):
+    def run_pipeline(self, input_path, pcd_save=True, mesh=False):
         print(f"Processing video: {input_path}")
-        if self.camera_intric is None:
-            self.camera_intric = np.array(
-                [[168.0, 0, 240], [0, 192.0, 135], [0, 0, 1]], dtype=np.float32
-            )
 
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
 
@@ -304,7 +302,7 @@ class SimpleVideoDataGenerator(DataGenerator):
 
             # Compute sequence data
             arr_4d_occ, arr_4d_mask, all_poses, all_intrinsics = (
-                self.compute_sequence_data(pcd)
+                self.compute_sequence_data(pcd, mesh=mesh)
             )
 
             # Save global data

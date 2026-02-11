@@ -54,9 +54,6 @@ class InternNavSequenceLoader:
                     entire_task_dir = os.path.join(scene_path, traj_dir)
 
                     # Construct paths for critical components
-                    rgb_dir = os.path.join(
-                        entire_task_dir, "videos/chunk-000/observation.images.rgb/"
-                    )
                     data_path = os.path.join(
                         entire_task_dir, "data/chunk-000/episode_000000.parquet"
                     )
@@ -84,12 +81,10 @@ class InternNavSequenceLoader:
 
                     # Validate that all required components exist before registering
                     if (
-                        os.path.exists(rgb_dir)
-                        and os.path.exists(data_path)
+                        os.path.exists(data_path)
                         and video_file_path
                     ):
                         self.trajectory_dirs.append(entire_task_dir)
-                        self.trajectory_rgb_paths.append(rgb_dir)
                         self.trajectory_data_paths.append(data_path)
                         self.trajectory_video_paths.append(video_file_path)
 
