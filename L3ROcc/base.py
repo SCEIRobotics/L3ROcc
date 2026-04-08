@@ -145,13 +145,10 @@ class DataGenerator:
             camera_pose,
             np.arange(camera_pose.shape[0]) * self.interval,
             np.arange(traj_len),
-        )
-        camera_pose_cuda = torch.from_numpy(camera_pose).to(self.device)
+        ) 
 
         # Get normalized camera rays in camera coordinates
-        ref_cam_index = 0
-        tgt_cam_index = 0
-        camera_pose_cuda = torch.from_numpy(camera_pose).to(self.device)
+        ref_cam_index = 0 
         norm_cam_ray_cam_coords = res["local_points"][0][ref_cam_index] / res[
             "local_points"
         ][0][ref_cam_index].norm(dim=2, keepdim=True)
@@ -171,7 +168,7 @@ class DataGenerator:
         # Estimate camera intrinsics via DLT
         self.camera_intric_rs = estimate_intrinsics(
             res["local_points"][0][ref_cam_index]
-        )
+        ).cpu().numpy()
 
         if torch.isnan(pcd).any() or torch.isinf(pcd).any():
             print("[Reconstruction] NaN/Inf detected in Model Output! Cleaning...")
@@ -673,8 +670,7 @@ class DataGenerator:
         Returns:
             None: Saves files to disk.
         """
-        import shutil
-
+ 
         pcd_to_save = self.pcd
         if isinstance(pcd_to_save, torch.Tensor):
             pcd_to_save = pcd_to_save.detach().cpu().numpy()
@@ -772,16 +768,10 @@ class DataGenerator:
         all_packed_masks = []
         all_camera_poses = []
 
-        # Prepare Intrinsics
-        current_intrinsic = self.camera_intric_rs
-        if hasattr(current_intrinsic, "detach"):
-            current_intrinsic = current_intrinsic.detach().cpu().numpy()
-        current_intrinsic = current_intrinsic.astype(np.float32)
-        intrinsic_rows = [row for row in current_intrinsic]
-        all_camera_intrinsics = [
-            [row.copy() for row in intrinsic_rows] for _ in range(total_frames)
-        ]
-
+        # Prepare Intrinsics 
+        current_intrinsic = self.camera_intric_rs.astype(np.float32)
+        all_camera_intrinsics = [[row for row in current_intrinsic]] * total_frames
+    
         # Convert pcd to points
         if mesh:
             print(f"Using mesh")
@@ -793,14 +783,14 @@ class DataGenerator:
 
         print(f"Processing {total_frames} frames (Simple Packed Mode)...")
         occ_start = time.time()
-        for i in range(total_frames):
-            current_pose_np = self.camera_pose[i]
-            current_pose = torch.from_numpy(current_pose_np).float().to(device)
 
-            # Collect extrinsics
-            pose_rows = [row.astype(np.float32) for row in current_pose_np]
-            all_camera_poses.append(pose_rows)
-
+        # collect camera poses
+        self.camera_pose = self.camera_pose.astype(np.float32)
+        all_camera_poses = [[row for row in pose] for pose in self.camera_pose]
+        camera_poses = torch.from_numpy(self.camera_pose).to(device).float()
+        for i in range(total_frames): 
+            current_pose = camera_poses[i]
+ 
             # Transform global OCC to current Camera Coordinates
             pcd_points_cam = self.convert_pointcloud_world_to_camera(
                 pcd_points_world, current_pose
@@ -823,16 +813,6 @@ class DataGenerator:
                 self.occ_pcd, T_cam2base
             )
 
-            # --- Process OCC Indices (Sparse) ---
-            valid_mask_occ = (
-                (occ_indices[:, 0] >= 0)
-                & (occ_indices[:, 0] < grid_dims[0])
-                & (occ_indices[:, 1] >= 0)
-                & (occ_indices[:, 1] < grid_dims[1])
-                & (occ_indices[:, 2] >= 0)
-                & (occ_indices[:, 2] < grid_dims[2])
-            )
-            valid_voxels_occ = occ_indices[valid_mask_occ]
             if len(valid_voxels_occ) > 0:
                 time_col = torch.full(
                     (len(valid_voxels_occ), 1), i, device=device, dtype=torch.int16
@@ -840,26 +820,14 @@ class DataGenerator:
                 frame_indices = torch.cat([time_col, valid_voxels_occ.short()], dim=1)
 
                 all_sparse_indices_occ.append(frame_indices)
-
-            # --- Process Mask (Packed Bits) ---
-            # Filter bounds
-            valid_mask_cam = (
-                (cam_visible_mask[:, 0] >= 0)
-                & (cam_visible_mask[:, 0] < grid_dims[0])
-                & (cam_visible_mask[:, 1] >= 0)
-                & (cam_visible_mask[:, 1] < grid_dims[1])
-                & (cam_visible_mask[:, 2] >= 0)
-                & (cam_visible_mask[:, 2] < grid_dims[2])
-            )
-            valid_voxels_cam = cam_visible_mask[valid_mask_cam].int()
-
+ 
             # Construct single frame Bool Grid (memory intensive momentarily)
             frame_grid = torch.zeros(grid_dims, dtype=torch.bool, device=device)
-            if len(valid_voxels_cam) > 0:
+            if len(cam_visible_mask) > 0:
                 frame_grid[
-                    valid_voxels_cam[:, 0],
-                    valid_voxels_cam[:, 1],
-                    valid_voxels_cam[:, 2],
+                    cam_visible_mask[:, 0],
+                    cam_visible_mask[:, 1],
+                    cam_visible_mask[:, 2],
                 ] = True
 
             # Compress using packbits
