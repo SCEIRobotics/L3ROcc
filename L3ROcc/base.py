@@ -156,6 +156,18 @@ class DataGenerator:
             "local_points"
         ][0][ref_cam_index].norm(dim=2, keepdim=True)
 
+        # Interpolate norm_cam_ray_cam_coords to 2× density
+        norm_cam_ray_cam_coords = norm_cam_ray_cam_coords.unsqueeze(0).permute(
+            0, 3, 1, 2
+        )
+        norm_cam_ray_cam_coords = torch.nn.functional.interpolate(
+            norm_cam_ray_cam_coords,
+            scale_factor=2,
+            mode="bilinear",
+            align_corners=True,
+        ).permute(0, 2, 3, 1)
+
+        norm_cam_ray_cam_coords = norm_cam_ray_cam_coords[0]
         # Estimate camera intrinsics via DLT
         self.camera_intric_rs = estimate_intrinsics(
             res["local_points"][0][ref_cam_index]
@@ -301,22 +313,22 @@ class DataGenerator:
             pdb.set_trace()
             return pcd
 
-    def check_visual_occ(self, occ_pcd_cam):
+    def check_visual_occ(self, occ_pcd, T_cam2base=None):
         """
         Performs Ray Casting to check which occupancy voxels are visible from the current camera pose.
 
         Args:
-            occ_pcd : Global occupancy map in World Coordinates (N, 3).
-            camera_pose : Current camera pose in World Coordinates (4, 4).
+            occ_pcd : Occupancy point cloud in Base Coordinates (N, 3).
+            T_cam2base : Camera to Base Transformation Matrix (4, 4).
 
         Returns:
             tuple:
-                - occ_voxels : Visible occupied voxels in Camera Coordinates (K, 3).
-                - camera_visible_mask : All voxels traversed by rays (Free + Occupied) in Camera Coordinates (M, 3).
+                - occ_voxels : Visible occupied voxels in Base Coordinates (K, 3).
+                - camera_visible_mask : All voxels traversed by rays (Free + Occupied) in Base Coordinates (M, 3).
         """
         # Transform Camera Coords to Voxel Indices
         occ_voxels = pcd_to_voxels(
-            occ_pcd_cam, self.voxel_size, self.pc_range
+            occ_pcd, self.voxel_size, self.pc_range
         )  # Shape: (-1, 3) in grid indices
 
         occ_voxels = torch.tensor(occ_voxels, device=self.norm_cam_ray.device)
@@ -337,20 +349,31 @@ class DataGenerator:
                 np.sqrt(
                     (self.pc_range[3] - self.pc_range[0]) ** 2
                     + (self.pc_range[5] - self.pc_range[2]) ** 2
+                    + (self.pc_range[4] - self.pc_range[1]) ** 2  # 加入 Y 轴 (前后深度)
                 )
             )
             / self.voxel_size
             + 1
-        )  # 200
+        )
 
         ray_cast_step_size = 1.0
-        ray_position = torch.zeros(
-            1, 3, device=self.norm_cam_ray.device
-        )  # Start at camera optical center (0,0,0)
+        if T_cam2base is not None:
+            if not isinstance(T_cam2base, torch.Tensor):
+                T_cam2base = torch.tensor(
+                    T_cam2base, device=self.norm_cam_ray.device, dtype=torch.float32
+                )
 
-        ray_direction_norm = self.norm_cam_ray.reshape(
-            -1, 3
-        )  # Normalized ray directions
+            # Ray origin remains at (0,0,0); only rotate the camera coordinate system
+            ray_position = torch.zeros(1, 3, device=self.norm_cam_ray.device)
+
+            # Ray direction must be multiplied by rotation matrix R to convert from camera to base view
+            R_c2b = T_cam2base[:3, :3]
+            ray_direction_norm = torch.matmul(self.norm_cam_ray.reshape(-1, 3), R_c2b.T)
+        else:
+            ray_position = torch.zeros(
+                1, 3, device=self.norm_cam_ray.device
+            )  # Default to (0,0,0)
+            ray_direction_norm = self.norm_cam_ray.reshape(-1, 3)
 
         pc_range_tensor = torch.tensor(
             self.pc_range[:3], device=self.norm_cam_ray.device
@@ -480,6 +503,48 @@ class DataGenerator:
 
         return points_world.astype(np.float32)
 
+    def convert_pointcloud_camera_to_base(self, points_camera, T_cam2base):
+        """
+        Transforms point cloud from Camera Coordinate System to Robot Base Coordinate System (Rotation ONLY).
+
+        Args:
+            points_camera : Points in camera frame (N, 3).
+            T_cam2base : Camera to Base  extrinsic matrix (4, 4).
+
+        Returns:
+            points_base: Points in base frame (N, 3).
+        """
+        if points_camera is None or len(points_camera) == 0:
+            if isinstance(points_camera, torch.Tensor):
+                return torch.zeros(
+                    (0, 3), device=points_camera.device, dtype=points_camera.dtype
+                )
+            return np.zeros((0, 3), dtype=np.float32)
+
+        # 1. Tensor Mode
+        if isinstance(points_camera, torch.Tensor):
+            if not isinstance(T_cam2base, torch.Tensor):
+                T_cam2base = torch.tensor(
+                    T_cam2base, device=points_camera.device, dtype=points_camera.dtype
+                )
+
+            R_c2b = T_cam2base[:3, :3]
+            # col：P_base= P_cam@ R_c2b
+            # row：P_base.T = P_cam.T @ R_c2b.T
+            points_base = torch.matmul(points_camera, R_c2b.T)
+            return points_base
+
+        # 2. Numpy Mode
+        else:
+            if points_camera.ndim == 1:
+                points_camera = points_camera.reshape(1, -1)
+
+            R_c2b = T_cam2base[:3, :3]
+
+            # Formula: P_base = P_cam @ R_b2c
+            points_base = points_camera @ R_c2b.T
+            return points_base.astype(np.float32)
+
     def get_temporal_occ(
         self, new_occ_world, current_pose_matrix, save_to_history=False
     ):
@@ -557,62 +622,9 @@ class DataGenerator:
             poses_pred : Predicted poses (N, 4, 4).
 
         Returns:
-            scale: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
+            scale or 1.0: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
         """
-
-        def to_mat4x4(p):
-            p = np.array(p)
-            if p.ndim == 1:
-                if p.size == 16:
-                    return p.reshape(4, 4)
-                if p.size == 12:
-                    return np.vstack([p.reshape(3, 4), [0, 0, 0, 1]])
-            return p
-
-        try:
-            traj_gt = np.array([to_mat4x4(p)[:3, 3] for p in poses_gt])
-            traj_pred = np.array([to_mat4x4(p)[:3, 3] for p in poses_pred])
-        except Exception as e:
-            print(f"[Scale Error] Data shape mismatch during extraction: {e}")
-            if len(poses_gt) > 0:
-                print(f"  GT pose[0] shape: {np.array(poses_gt[0]).shape}")
-            if len(poses_pred) > 0:
-                print(f"  Pred pose[0] shape: {np.array(poses_pred[0]).shape}")
-            return 1.0
-
-        # Ensure frame counts match
-        n_frames = min(len(traj_gt), len(traj_pred))
-        traj_gt = traj_gt[:n_frames]
-        traj_pred = traj_pred[:n_frames]
-
-        if n_frames < 5:
-            print("Warning: Trajectory too short for scale estimation. Using scale=1.0")
-            return 1.0
-
-        # Sim3 Scale: Ratio of standard deviations
-        gt_centered = traj_gt - np.mean(traj_gt, axis=0)
-        pred_centered = traj_pred - np.mean(traj_pred, axis=0)
-
-        std_gt = np.sqrt(np.mean(np.sum(gt_centered**2, axis=1)))
-        std_pred = np.sqrt(np.mean(np.sum(pred_centered**2, axis=1)))
-
-        # Avoid division by zero
-        if std_pred < 1e-6 or np.isnan(std_pred) or np.isnan(std_gt):
-            print(
-                f"[Scale Warning] Invalid std detected (GT:{std_gt}, Pred:{std_pred}). Using scale=1.0"
-            )
-            return 1.0
-
-        scale = std_gt / std_pred
-
-        if np.isnan(scale) or np.isinf(scale):
-            print(f"[Scale Warning] Calculated scale is NaN/Inf. Using 1.0")
-            return 1.0
-
-        print(
-            f"[Scale Info] GT std: {std_gt:.4f}, Pred std: {std_pred:.4f} -> Scale: {scale:.4f}"
-        )
-        return scale
+        return 1.0
 
     def align_with_gt_scale(self, input_path, pcd):
         """
@@ -628,34 +640,7 @@ class DataGenerator:
                 - pcd : The scaled point cloud.
                 - scale : The applied scale factor.
         """
-        scale = 1.0
-
-        try:
-            # Get GT poses from subclass
-            gt_poses_np = self.get_gt_poses(input_path)
-
-            if gt_poses_np is None or len(gt_poses_np) == 0:
-                print(
-                    "[Scale Info] No GT poses provided by subclass. Skipping alignment."
-                )
-                return pcd, 1.0
-
-            # Calculate Scale
-            scale = self.compute_trajectory_scale(gt_poses_np, self.camera_pose)
-
-            # Apply Correction
-            if abs(scale - 1.0) > 1e-4:
-                print(f"Applying scale correction: {scale:.4f}")
-
-                # Scale point cloud
-                pcd = pcd * scale
-
-                # Scale camera translations (if needed)
-                # self.camera_pose[:, :3, 3] *= scale
-            return pcd, scale
-        except Exception as e:
-            print(f"[Scale Error] Exception during alignment: {e}")
-            return pcd, 1.0
+        return pcd, 1.0
 
     def get_io_paths(self, input_path):
         """
@@ -763,7 +748,7 @@ class DataGenerator:
             )
             print(f"Saved Mask in {time.time() - t_start:.2f}s")
 
-    def compute_sequence_data(self, pcd, mesh=True):
+    def compute_sequence_data(self, pcd, mesh=True, T_cam2base=None, scale=1.0):
         """
         Computes sequential data for the entire trajectory, including sparse OCC indices
         and compressed visibility masks.
@@ -821,11 +806,22 @@ class DataGenerator:
                 pcd_points_world, current_pose
             )  # Shape: (-1, 3) in meters
 
+            pcd_points_cam *= scale
+
+            if T_cam2base is not None:
+                pcd_points_base = self.convert_pointcloud_camera_to_base(
+                    pcd_points_cam, T_cam2base
+                )  # Shape: (-1, 3) in meters
+            else:
+                pcd_points_base = pcd_points_cam
+
             # Convert to occupancy (pcd is maintained at aligned scale)
-            self.occ_pcd = self.pcd_to_occ(pcd_points_cam)
+            self.occ_pcd = self.pcd_to_occ(pcd_points_base)
 
             # Check visibility
-            occ_indices, cam_visible_mask = self.check_visual_occ(self.occ_pcd)
+            occ_indices, cam_visible_mask = self.check_visual_occ(
+                self.occ_pcd, T_cam2base
+            )
 
             # --- Process OCC Indices (Sparse) ---
             valid_mask_occ = (
@@ -873,12 +869,6 @@ class DataGenerator:
         occ_end = time.time()
         print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
 
-        # --- Merge ---
-        # final_occ = (
-        #     np.vstack(all_sparse_indices_occ)
-        #     if all_sparse_indices_occ
-        #     else np.zeros((0, 4), dtype=np.int16)
-        # )
         final_occ = (
             torch.concat(all_sparse_indices_occ, dim=0).cpu().numpy()
             if all_sparse_indices_occ
@@ -889,8 +879,6 @@ class DataGenerator:
             final_mask_packed.reshape(final_mask_packed.shape[0], -1).cpu().numpy()
         )
         final_mask_packed = np.packbits(final_mask_packed, axis=1)
-        # import pdb
-        # pdb.set_trace()
         return final_occ, final_mask_packed, all_camera_poses, all_camera_intrinsics
 
     def update_metadata(

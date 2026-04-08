@@ -290,7 +290,7 @@ class SimpleVideoDataGenerator(DataGenerator):
         except Exception as e:
             print(f"Warning: Failed to copy video file: {e}")
 
-    def run_pipeline(self, input_path, pcd_save=True, mesh=False):
+    def run_pipeline(self, input_path, pcd_save=True, mesh=False, T_cam2base=None):
         print(f"Processing video: {input_path}")
 
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
@@ -302,7 +302,7 @@ class SimpleVideoDataGenerator(DataGenerator):
 
             # Compute sequence data
             arr_4d_occ, arr_4d_mask, all_poses, all_intrinsics = (
-                self.compute_sequence_data(pcd, mesh=mesh)
+                self.compute_sequence_data(pcd, mesh=mesh, T_cam2base=None, scale=1.0)
             )
 
             # Save global data

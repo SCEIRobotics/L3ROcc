@@ -2,10 +2,10 @@
 'min_density': 0.1
 'n_threads': 1
 'downsample': False
-'voxel_size': 0.02
+'voxel_size': 0.04
 'max_nn': 20
-'pc_range':  [-2, -1.5, -0.5, 2, 1, 3.5]
-'occ_size':  [200, 125, 200]
+'pc_range':  [-2, -5.6, -0.6, 2, 0, 1.8]
+'occ_size':  [100, 140, 60]
 'self_range': [3.0, 1.5, 2.0]
 'ray_cast_step_size': 1.0
 'interval': 10

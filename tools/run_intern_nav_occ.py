@@ -66,7 +66,7 @@ def run_dataset_pipeline(args):
     for i in range(len(loader)):
         try:
             # A. Retrieve information from the loader
-            video_path, cam_intrinsics = loader.get_trajectory_info(i)
+            video_path, cam_intrinsics, cam_extrinsics = loader.get_trajectory_info(i)
 
             if video_path is None:
                 print(f"Skipping trajectory {i}: Video file not found.")
@@ -119,7 +119,11 @@ def run_dataset_pipeline(args):
             # D. Run the core pipeline
             # 'pcd_save=True' enables the saving logic
             generator.run_pipeline(
-                input_path_for_gen, pcd_save=pcd_save, overwrite=overwrite, mesh=mesh
+                input_path_for_gen,
+                pcd_save=pcd_save,
+                overwrite=overwrite,
+                mesh=mesh,
+                T_cam2base=cam_extrinsics,
             )
 
             print("Processing successful!")
@@ -138,13 +142,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data/",
+        default="./data/traj_data/",
         help="Directory to load dataset",
     )
     parser.add_argument(
         "--output_root",
         type=str,
-        default="data/examples/small_vln_n1/traj_data/",
+        default="./data/traj_data/",
         help="Directory to save outputs",
     )
 
@@ -158,7 +162,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overwrite",
         type=bool,
-        default=False,
+        default=True,
         help="Overwrite existing files",
     )
 

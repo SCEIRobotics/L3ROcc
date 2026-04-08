@@ -50,7 +50,9 @@ def run_normal_data_pipeline(args):
     # [Option 2] run_pipeline:
     # Generates files required for the LeRobot format and standard dataset structure.
     if args.mode == "run":
-        generator.run_pipeline(args.video_path, pcd_save=pcd_save, mesh=mesh)
+        generator.run_pipeline(
+            args.video_path, pcd_save=pcd_save, mesh=mesh, T_cam2base=None
+        )
 
 
 if __name__ == "__main__":
@@ -61,13 +63,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--video_path",
         type=str,
-        default="data/examples/office.mp4",
+        default="./data/office.mp4",
         help="Path to the video file to process.",
     )
     parser.add_argument(
         "--save_dir",
         type=str,
-        default="data/examples/outputs/",
+        default="./data/outputs/",
         help="Path to the directory where processed outputs will be saved.",
     )
     parser.add_argument(
