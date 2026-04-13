@@ -809,7 +809,7 @@ class DataGenerator:
             self.occ_pcd = self.pcd_to_occ(pcd_points_base)
 
             # Check visibility
-            occ_indices, cam_visible_mask = self.check_visual_occ(
+            valid_voxels_occ, cam_visible_mask = self.check_visual_occ(
                 self.occ_pcd, T_cam2base
             )
 

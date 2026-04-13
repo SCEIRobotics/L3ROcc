@@ -162,7 +162,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overwrite",
         type=bool,
-        default=True,
+        default=False,
         help="Overwrite existing files",
     )
 
