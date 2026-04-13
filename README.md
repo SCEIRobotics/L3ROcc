@@ -14,7 +14,7 @@
 
 <div align="center">
   <a href="https://youtu.be/oqntFdGxhwg" target="_blank">
-    <img src="https://github.com/user-attachments/assets/66e4fa9f-7f20-40ca-9814-43b3ebf92688" width="100%" alt="L3ROcc Demo">
+    <img src="https://github.com/user-attachments/assets/5a9204d8-88c0-4f09-bf31-ac6a0a690326" width="100%" alt="L3ROcc Demo">
   </a>
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
   <p>
