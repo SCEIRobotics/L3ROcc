@@ -80,10 +80,7 @@ class InternNavSequenceLoader:
                                     break
 
                     # Validate that all required components exist before registering
-                    if (
-                        os.path.exists(data_path)
-                        and video_file_path
-                    ):
+                    if os.path.exists(data_path) and video_file_path:
                         self.trajectory_dirs.append(entire_task_dir)
                         self.trajectory_data_paths.append(data_path)
                         self.trajectory_video_paths.append(video_file_path)
@@ -104,6 +101,7 @@ class InternNavSequenceLoader:
             tuple: (video_path, camera_intrinsic)
                 - video_path (str): Absolute path to the video file.
                 - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix.
+                - camera_extrinsic (np.ndarray or None): 4x4 camera to base extrinsic matrix.
         """
 
         # 1. Retrieve stored paths
@@ -112,6 +110,7 @@ class InternNavSequenceLoader:
 
         # 2. Parse Parquet data to extract camera intrinsics
         camera_intrinsic = None
+        camera_extrinsic = None
         try:
             df = pd.read_parquet(data_path)
             # Flattened format [fx, 0, cx, 0, fy, cy, 0, 0, 1] -> Reshape to (3, 3)
@@ -121,9 +120,14 @@ class InternNavSequenceLoader:
             print(
                 f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
             )
+            camera_extrinsic = np.vstack(
+                np.array(df["observation.camera_extrinsic"].tolist()[0])
+            ).reshape(4, 4)
+            # print(f"Loaded camera extrinsic for trajectory {index}: \n{camera_extrinsic}")
         except Exception as e:
             print(f"Error reading parquet {data_path}: {e}")
             # Caller must handle None return type
             camera_intrinsic = None
+            camera_extrinsic = None
 
-        return video_path, camera_intrinsic
+        return video_path, camera_intrinsic, camera_extrinsic

@@ -34,6 +34,11 @@ class InternNavDataGenerator(DataGenerator):
         super().__init__(config_path, save_dir, model_dir)
 
     def check_processing_status(self, input_path, overwrite=False):
+        """
+        Check if the data needs to be processed.
+        It verifies the existence of final target files, Parquet columns & lengths,
+        and scale values in the episodes.jsonl.
+        """
         if overwrite:
             print(
                 f"[Status] Force Overwrite enabled. Running '{os.path.basename(input_path)}'."
@@ -41,13 +46,80 @@ class InternNavDataGenerator(DataGenerator):
             return True
 
         paths = self.get_io_paths(input_path)
-        final_target = paths["mask_seq"]
+        mask_final_target = paths["mask_seq"]
+        occ_final_target = paths["occ_seq"]
 
-        if os.path.exists(final_target):
-            print(f"[Status] Found '{os.path.basename(final_target)}'. Skipping.")
-            return False
+        if not os.path.exists(mask_final_target):
+            return True
+        if not os.path.exists(occ_final_target):
+            return True
 
-        return True
+        parquet_path = paths.get("parquet")
+        if not parquet_path or not os.path.exists(parquet_path):
+            return True
+
+        try:
+            df = pd.read_parquet(parquet_path, engine="pyarrow")
+
+            if (
+                "observation.camera_extrinsic_occ" not in df.columns
+                or "observation.camera_intrinsic_occ" not in df.columns
+            ):
+                print(
+                    f"[Status] Missing OCC camera columns in parquet. Needs generation."
+                )
+                return True
+
+            if "observation.camera_extrinsic" not in df.columns:
+                print(
+                    f"[Status] Base camera_extrinsic missing in parquet. Needs generation."
+                )
+                return True
+
+            valid_base_ext = df["observation.camera_extrinsic"].dropna()
+            valid_occ_ext = df["observation.camera_extrinsic_occ"].dropna()
+            valid_occ_int = df["observation.camera_intrinsic_occ"].dropna()
+
+            if len(valid_occ_ext) != len(valid_base_ext) or len(valid_occ_int) != len(
+                valid_base_ext
+            ):
+                print(
+                    f"[Status] Valid length mismatch between base extrinsic and OCC camera data. Needs generation."
+                )
+                return True
+
+        except Exception as e:
+            print(
+                f"[Status] Error reading parquet for status check ({e}). Needs generation."
+            )
+            return True
+
+        meta_dir = os.path.join(self.save_path, "meta")
+        jsonl_path = os.path.join(meta_dir, "episodes.jsonl")
+
+        if not os.path.exists(jsonl_path):
+            return True
+
+        try:
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+                entries = [json.loads(line) for line in lines if line.strip()]
+
+                if not entries or any("scale" not in entry for entry in entries):
+                    print(
+                        f"[Status] Missing 'scale' key in episodes.jsonl. Needs generation."
+                    )
+                    return True
+        except Exception as e:
+            print(
+                f"[Status] Error reading jsonl for status check ({e}). Needs generation."
+            )
+            return True
+
+        print(
+            f"[Status] Found '{os.path.basename(mask_final_target)}' '{os.path.basename(occ_final_target)}' and all metadata is valid. Skipping."
+        )
+        return False
 
     def get_io_paths(self, input_path):
         """
@@ -157,6 +229,110 @@ class InternNavDataGenerator(DataGenerator):
         except Exception as e:
             print(f"[Subclass Error] Failed to load GT poses: {e}")
             raise e
+
+    def compute_trajectory_scale(self, poses_gt, poses_pred):
+        """
+        Computes the scale ratio (GT / Pred) between predicted and ground truth trajectories.
+        Uses the ratio of standard deviations (Sim3 scale estimation).
+
+        Args:
+            poses_gt : Ground truth poses (N, 4, 4).
+            poses_pred : Predicted poses (N, 4, 4).
+
+        Returns:
+            scale: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
+        """
+
+        def to_mat4x4(p):
+            p = np.array(p)
+            if p.ndim == 1:
+                if p.size == 16:
+                    return p.reshape(4, 4)
+                if p.size == 12:
+                    return np.vstack([p.reshape(3, 4), [0, 0, 0, 1]])
+            return p
+
+        try:
+            traj_gt = np.array([to_mat4x4(p)[:3, 3] for p in poses_gt])
+            traj_pred = np.array([to_mat4x4(p)[:3, 3] for p in poses_pred])
+        except Exception as e:
+            print(f"[Scale Error] Data shape mismatch during extraction: {e}")
+            if len(poses_gt) > 0:
+                print(f"  GT pose[0] shape: {np.array(poses_gt[0]).shape}")
+            if len(poses_pred) > 0:
+                print(f"  Pred pose[0] shape: {np.array(poses_pred[0]).shape}")
+            return 1.0
+
+        # Ensure frame counts match
+        n_frames = min(len(traj_gt), len(traj_pred))
+        traj_gt = traj_gt[:n_frames]
+        traj_pred = traj_pred[:n_frames]
+
+        if n_frames < 5:
+            print("Warning: Trajectory too short for scale estimation. Using scale=1.0")
+            return 1.0
+
+        # Sim3 Scale: Ratio of standard deviations
+        gt_centered = traj_gt - np.mean(traj_gt, axis=0)
+        pred_centered = traj_pred - np.mean(traj_pred, axis=0)
+
+        std_gt = np.sqrt(np.mean(np.sum(gt_centered**2, axis=1)))
+        std_pred = np.sqrt(np.mean(np.sum(pred_centered**2, axis=1)))
+
+        # Avoid division by zero
+        if std_pred < 1e-6 or np.isnan(std_pred) or np.isnan(std_gt):
+            print(
+                f"[Scale Warning] Invalid std detected (GT:{std_gt}, Pred:{std_pred}). Using scale=1.0"
+            )
+            return 1.0
+
+        scale = std_gt / std_pred
+
+        if np.isnan(scale) or np.isinf(scale):
+            print(f"[Scale Warning] Calculated scale is NaN/Inf. Using 1.0")
+            return 1.0
+
+        print(
+            f"[Scale Info] GT std: {std_gt:.4f}, Pred std: {std_pred:.4f} -> Scale: {scale:.4f}"
+        )
+        return scale
+
+    def align_with_gt_scale(self, input_path, pcd):
+        """
+        Attempts to align the predicted point cloud scale with Ground Truth.
+        Dependent on `get_gt_poses`.
+
+        Args:
+            input_path : Path to the input data.
+            pcd : The predicted point cloud (N, 3).
+
+        Returns:
+            tuple:
+                - pcd : The scaled point cloud.
+                - scale : The applied scale factor.
+        """
+        scale = 1.0
+
+        try:
+            # Get GT poses from subclass
+            gt_poses_np = self.get_gt_poses(input_path)
+
+            if gt_poses_np is None or len(gt_poses_np) == 0:
+                print(
+                    "[Scale Info] No GT poses provided by subclass. Skipping alignment."
+                )
+                return pcd, 1.0
+
+            # Calculate Scale
+            scale = self.compute_trajectory_scale(gt_poses_np, self.camera_pose)
+            # Apply Correction
+            if abs(scale - 1.0) > 1e-4:
+                print(f"Applying scale correction: {scale:.4f}")
+            return pcd, scale
+
+        except Exception as e:
+            print(f"[Scale Error] Exception during alignment: {e}")
+            return pcd, 1.0
 
     def update_metadata(self, paths, all_poses, all_intrinsics, input_path):
         """
@@ -334,7 +510,9 @@ class InternNavDataGenerator(DataGenerator):
                 print(f"Error updating {file_path}: {e}")
                 break
 
-    def run_pipeline(self, input_path, pcd_save=True, overwrite=False, mesh=False):
+    def run_pipeline(
+        self, input_path, pcd_save=True, overwrite=False, mesh=False, T_cam2base=None
+    ):
         """
         Executes the full data generation pipeline:
         Reconstruction -> GT Scale Alignment -> Global Storage -> Sequence Calculation -> Metadata Update
@@ -342,6 +520,9 @@ class InternNavDataGenerator(DataGenerator):
         Args:
             input_path (str): Path to the input video file.
             pcd_save (bool, optional): Whether to save 3D artifacts (point cloud, etc.). Defaults to True.
+            overwrite (bool, optional): Whether to overwrite existing files. Defaults to False.
+            mesh (bool, optional): Whether to use mesh instead of origin point cloud. Defaults to False.
+            T_cam2base (np.ndarray, optional): 4x4 transformation matrix from camera to base coordinate system. Defaults to None.
 
         Returns:
             None
@@ -349,7 +530,7 @@ class InternNavDataGenerator(DataGenerator):
         # Check Status
         if not self.check_processing_status(input_path, overwrite=overwrite):
             return
-            
+
         # 3D Reconstruction
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
 
@@ -369,7 +550,9 @@ class InternNavDataGenerator(DataGenerator):
 
         # Execute core computation
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
-            self.compute_sequence_data(pcd, mesh=mesh)
+            self.compute_sequence_data(
+                pcd, mesh=mesh, T_cam2base=T_cam2base, scale=scale
+            )
         )
 
         # Save global data

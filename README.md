@@ -14,7 +14,7 @@
 
 <div align="center">
   <a href="https://youtu.be/oqntFdGxhwg" target="_blank">
-    <img src="https://github.com/user-attachments/assets/66e4fa9f-7f20-40ca-9814-43b3ebf92688" width="100%" alt="L3ROcc Demo">
+    <img src="https://github.com/user-attachments/assets/5a9204d8-88c0-4f09-bf31-ac6a0a690326" width="100%" alt="L3ROcc Demo">
   </a>
   <p><i>Left: RGB Input | Middle: 3D Point Cloud Fusion | Right: 4D Occupancy Grid</i></p>
   <p>
@@ -24,6 +24,12 @@
 
 `L3ROcc` is a high-performance visual geometry framework designed to transform standard RGB video sequences into high-precision **3D Point Clouds**, **3D Occupancy Grids**, and **4D Temporal Observation Data**.
 This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its foundational reconstruction engine, and implements a fully automated pipeline for data labeling and alignment that is customized for navigation learning tasks. All processed data adheres to the **LeRobotDataset v2.1** specification. In practical testing, processing a 16-second video segment using this pipeline requires roughly 15 seconds to produce occupancy (occ) and mask data.
+
+## 📢 What's New (Latest Updates)
+- **Physical Scale Alignment:** The generation pipeline now applies a dynamic scaling factor to the Pi3 model's point cloud output, ensuring the reconstructed 3D scenes are strictly aligned with real-world metric dimensions.
+- **Base Frame Occupancy:** Per-frame occupancy data is now explicitly transformed and anchored to the **robot base coordinate system** (rather than the local camera frame), significantly streamlining downstream embodied AI navigation and control tasks.
+- **Smart Data Integrity Checks:** Introduced strict file existence validation. The pipeline now verifies all expected output artifacts for a trajectory before skipping, preventing incomplete or corrupted data generation during batch processing.
+- **Enhanced Code Robustness:** Refactored the Object-Oriented structure to standardize subclass method overrides and decoupled absolute paths into relative paths for seamless open-source deployment.
 
 ## ✨ Key Features
 * **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and scale-invariant globally point clouds from RGB video streams.
