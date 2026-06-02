@@ -1,23 +1,26 @@
 """
-Standalone plotter for exp_scale_compare.py.
+exp_scale_compare.py 的绘图模块。
 
-Run in its OWN process (no torch import) -- on this Windows env matplotlib's numpy/LAPACK
-calls crash (0xc06d007f) once torch's MKL is resident in the same interpreter.
+可两种方式调用：
+  1) 进程内(Linux)：``import exp_plot; exp_plot.plot_episode(dir)`` / ``plot_summary(dir)``；
+  2) 独立子进程(Windows)：``python exp_plot.py <dir> [episode|summary]``。
+Windows 上必须独立进程运行：一旦 torch 的 MKL 驻留同一解释器，matplotlib 的 numpy/LAPACK
+调用会崩溃(0xc06d007f)。
 
-Usage:
-    python tools/exp_plot.py <out_dir>
-where <out_dir> contains metrics.json and plotdata.npz (written by exp_scale_compare.py).
+- plot_episode(<dir>)：<dir> 含 metrics.json + plotdata.npz，输出该集 6 张图。
+- plot_summary(<dir>)：<dir> 含 summary.json，输出跨 episode 的汇总图。
 """
 
 import os
 import sys
 import json
 
-# numpy 2.2.6 + MKL on this Windows env crashes matplotlib (0xc06d007f) under the default
-# threading layer. Force a single-threaded sequential MKL BEFORE numpy is imported.
-os.environ.setdefault("MKL_THREADING_LAYER", "SEQUENTIAL")
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
+# 仅 Windows 需要：在 import numpy 之前强制单线程 MKL，规避 matplotlib 崩溃(0xc06d007f)。
+# Linux 无此问题，不设置(也无意义，子进程才在 numpy 前生效)。
+if sys.platform == "win32":
+    os.environ.setdefault("MKL_THREADING_LAYER", "SEQUENTIAL")
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import numpy as np
 import matplotlib
@@ -25,7 +28,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-def main(out_dir):
+def plot_episode(out_dir):
+    """渲染单个 episode 的 6 张诊断图(读 out_dir 下的 metrics.json + plotdata.npz)。"""
     with open(os.path.join(out_dir, "metrics.json"), "r", encoding="utf-8") as f:
         M = json.load(f)
     d = np.load(os.path.join(out_dir, "plotdata.npz"))
@@ -132,5 +136,66 @@ def main(out_dir):
     print(f"[viz] saved 6 figures to {out_dir}")
 
 
+def plot_summary(out_dir):
+    """渲染跨 episode 汇总图(读 out_dir 下的 summary.json)，输出 summary.png。"""
+    with open(os.path.join(out_dir, "summary.json"), "r", encoding="utf-8") as f:
+        S = json.load(f)
+    rows = S.get("rows", [])
+    if not rows:
+        print("[viz] summary.json 无有效 episode，跳过汇总图。")
+        return
+
+    methods = ["model", "depth", "model_dc"]
+    colors = {"model": "#d9534f", "depth": "#5cb85c", "model_dc": "#5bc0de"}
+    agg = S["agg"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
+
+    # A) 三方法误差的均值±标准差 -------------------------------------------------------
+    means = [agg[f"e_{m}"]["mean"] * 100 if agg.get(f"e_{m}") else 0.0 for m in methods]
+    stds = [agg[f"e_{m}"]["std"] * 100 if agg.get(f"e_{m}") else 0.0 for m in methods]
+    bars = axes[0].bar(methods, means, yerr=stds, capsize=5,
+                       color=[colors[m] for m in methods])
+    for b, mu in zip(bars, means):
+        axes[0].text(b.get_x() + b.get_width() / 2, b.get_height(), f"{mu:.1f}%",
+                     ha="center", va="bottom", fontsize=10)
+    axes[0].set_ylabel("Trajectory-length error vs GT (%)")
+    axes[0].set_title(f"Mean±std error  (n={S['n_episodes']})")
+    axes[0].grid(axis="y", alpha=0.3)
+
+    # B) 各方法"最优次数" ---------------------------------------------------------------
+    wins = S.get("win_counts", {})
+    wbars = axes[1].bar(methods, [wins.get(m, 0) for m in methods],
+                        color=[colors[m] for m in methods])
+    for b, m in zip(wbars, methods):
+        axes[1].text(b.get_x() + b.get_width() / 2, b.get_height(), str(wins.get(m, 0)),
+                     ha="center", va="bottom", fontsize=10)
+    axes[1].set_ylabel("# episodes where most accurate")
+    axes[1].set_title("Win counts")
+    axes[1].grid(axis="y", alpha=0.3)
+
+    # C) 逐 episode 的 s_depth vs c_gt 散点(看深度尺度是否更接近真值理想尺度) ----------
+    c_gt = [r["c_gt_rgb"] for r in rows if r.get("c_gt_rgb") is not None]
+    s_dep = [r["s_depth"] for r in rows if r.get("s_depth") is not None]
+    if c_gt and s_dep:
+        axes[2].scatter(c_gt, s_dep, s=28, color="#5cb85c", label="depth (s_depth)", zorder=3)
+        axes[2].scatter(c_gt, [1.0] * len(c_gt), s=28, color="#d9534f", marker="x",
+                        label="model (c=1)", zorder=3)
+        lo = min(min(c_gt), min(s_dep), 1.0) * 0.95
+        hi = max(max(c_gt), max(s_dep), 1.0) * 1.05
+        axes[2].plot([lo, hi], [lo, hi], "k--", lw=1, label="y = x (ideal)")
+        axes[2].set_xlim(lo, hi); axes[2].set_ylim(lo, hi)
+        axes[2].set_xlabel("GT-optimal scale c_gt"); axes[2].set_ylabel("applied scale")
+        axes[2].set_title("Per-episode: closer to y=x is better")
+        axes[2].legend(fontsize=8); axes[2].grid(alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_dir, "summary.png"), dpi=140)
+    plt.close(fig)
+    print(f"[viz] saved summary figure to {os.path.join(out_dir, 'summary.png')}")
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    _dir = sys.argv[1]
+    _mode = sys.argv[2] if len(sys.argv) > 2 else "episode"
+    (plot_summary if _mode == "summary" else plot_episode)(_dir)

@@ -15,7 +15,7 @@
 并输出逐帧诊断曲线和若干可视化图。
 
 运行(在项目根目录、L3ROcc conda 环境内)：
-    python tools/exp_scale_compare.py --rosbag_dir G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555 --episode episode_001
+    python tools/exp_scale/exp_scale_compare.py --rosbag_dir G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555 --episode episode_001
 """
 
 import os
@@ -38,8 +38,14 @@ else:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-# 无论从哪个目录启动，都让本地包可被 import。
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 无论脚本放在 tools/ 下哪一层、从哪个目录启动，都向上搜索定位项目根目录
+# (含 L3ROcc/ 与 third_party/ 的那一层)，再让本地包可被 import。
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+while _PROJECT_ROOT != os.path.dirname(_PROJECT_ROOT):
+    if os.path.isdir(os.path.join(_PROJECT_ROOT, "L3ROcc")) and \
+       os.path.isdir(os.path.join(_PROJECT_ROOT, "third_party")):
+        break
+    _PROJECT_ROOT = os.path.dirname(_PROJECT_ROOT)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -47,35 +53,26 @@ import numpy as np
 import torch
 import pandas as pd
 
-# -----------------------------------------------------------------------------------------
-# Windows 下 safetensors 的规避方案。
-# 在本环境(huggingface_hub 1.16.x + safetensors 0.7 + torch 2.5.1 cu121)下，调用
-# Pi3X.from_pretrained() 会段错误：它会先构造模型，而在 safetensors.load_file 之前导入
-# Pi3X 模块(dinov2 / 注意力的 CUDA 初始化)会破坏 mmap 加载(在 torch/storage.py 中报
-# "access violation")。若在导入模型模块“之前”先把权重加载到 CPU，则可正常加载。
-# 因此这里先预加载权重，再 monkeypatch from_pretrained，让它构造模型并载入缓存的 state dict
-# (之后把模型 .to(cuda) 不会有问题)。
-# -----------------------------------------------------------------------------------------
-from safetensors.torch import load_file as _st_load_file
+# Windows safetensors 规避（仅 Windows 需要；Linux/服务器走原生 from_pretrained）。
+# 经验规则：必须在导入 generator（进而 open3d / Pi3X 模块）之前先把权重加载到 CPU，
+# 否则之后构造 Pi3X 时会在卷积层初始化处段错误(access violation)。这里先 load_file，
+# 再 monkeypatch Pi3X.from_pretrained 用预加载权重构造模型；base.py 惰性调用 from_pretrained
+# 会命中此 monkeypatch。Linux 上跳过本段，base.py 直接原生加载。
+if sys.platform == "win32":
+    from safetensors.torch import load_file as _st_load_file
+    _PI3X_SD = _st_load_file(
+        os.path.join(_PROJECT_ROOT, "ckpt", "pi3x", "model.safetensors"), device="cpu"
+    )
+    from third_party.pi3.pi3.models.pi3x import Pi3X as _Pi3X
 
-_PI3X_CKPT_DIR = os.path.join(_PROJECT_ROOT, "ckpt", "pi3x")
-print(f"[load] pre-loading Pi3X weights to CPU from {_PI3X_CKPT_DIR} ...")
-_PI3X_STATE_DICT = _st_load_file(os.path.join(_PI3X_CKPT_DIR, "model.safetensors"), device="cpu")
+    def _safe_from_pretrained(cls, *args, **kwargs):
+        model = _Pi3X(use_multimodal=True)
+        missing, unexpected = model.load_state_dict(_PI3X_SD, strict=False)
+        if missing or unexpected:
+            print(f"[load] state_dict missing={len(missing)} unexpected={len(unexpected)}")
+        return model
 
-# 权重已在内存中，此时再导入模型模块就安全了。
-from third_party.pi3.pi3.models.pi3x import Pi3X
-
-
-def _safe_from_pretrained(cls, *args, **kwargs):
-    """替换原 from_pretrained 的等价实现，规避 Windows 下的段错误。"""
-    model = Pi3X(use_multimodal=True)
-    missing, unexpected = model.load_state_dict(_PI3X_STATE_DICT, strict=False)
-    if missing or unexpected:
-        print(f"[load] state_dict missing={len(missing)} unexpected={len(unexpected)}")
-    return model  # 调用方随后会执行 .to(device).eval()
-
-
-Pi3X.from_pretrained = classmethod(_safe_from_pretrained)
+    _Pi3X.from_pretrained = classmethod(_safe_from_pretrained)
 
 from L3ROcc.generater.normal_data_vln_env import SimpleVideoDataGenerator
 from L3ROcc.utils import load_images_as_tensor
@@ -222,50 +219,73 @@ def depth_scale_ratios(pred_depth, sensor_depth, conf, conf_thr, dmin, dmax):
 
 
 # --------------------------------------------------------------------------------------
-# 主流程
+# 跨平台绘图：Linux 进程内直接调用；Windows 用独立子进程(避开 torch+MKL 同进程崩溃)
 # --------------------------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser(description="对比 Pi3X 的“模型预测尺度”与“深度推算尺度”。")
-    ap.add_argument("--rosbag_dir", type=str,
-                    default=r"G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555")
-    ap.add_argument("--episode", type=str, default="episode_001")
-    ap.add_argument("--out_dir", type=str, default=os.path.join(_PROJECT_ROOT, "tools", "exp_out"))
-    ap.add_argument("--conf_thr", type=float, default=0.1, help="像素有效所需的 Pi3X 最小置信度")
-    ap.add_argument("--dmin", type=float, default=0.25, help="可信传感器深度下限(米)")
-    ap.add_argument("--dmax", type=float, default=6.0, help="可信传感器深度上限(米)")
-    ap.add_argument("--cpu", action="store_true",
-                    help="强制 CPU 推理(显存 < ~8GB 时需要；在导入阶段即生效)。")
-    ap.add_argument("--pixel_limit", type=int, default=255000,
-                    help="送入 Pi3X 的每帧最大像素数。CPU 运行时调小(如 120000)可加速。")
-    args = ap.parse_args()
+def render(out_dir, mode):
+    """mode ∈ {"episode", "summary"}。out_dir 为对应数据(plotdata.npz / summary.json)所在目录。"""
+    if sys.platform == "win32":
+        import subprocess
+        plot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_plot.py")
+        env = dict(os.environ)
+        env["MKL_THREADING_LAYER"] = "SEQUENTIAL"
+        env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+        env["OMP_NUM_THREADS"] = "1"
+        r = subprocess.run([sys.executable, plot_script, out_dir, mode],
+                           capture_output=True, text=True, env=env)
+        sys.stdout.write(r.stdout)
+        if r.returncode != 0:
+            sys.stderr.write(r.stderr)
+            print(f"[viz] plotting subprocess failed (rc={r.returncode})")
+    else:
+        _sd = os.path.dirname(os.path.abspath(__file__))
+        if _sd not in sys.path:
+            sys.path.insert(0, _sd)
+        import exp_plot
+        (exp_plot.plot_summary if mode == "summary" else exp_plot.plot_episode)(out_dir)
 
-    rb = args.rosbag_dir
-    rgb_path = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB", f"{args.episode}.mp4")
-    depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{args.episode}.mkv")
+
+# --------------------------------------------------------------------------------------
+# episode / rosbag 发现
+# --------------------------------------------------------------------------------------
+def discover_episodes(rb):
+    """返回某个 rosbag 目录下所有 episode 名(按 RGB 视频名)。"""
+    d = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB")
+    if not os.path.isdir(d):
+        return []
+    return sorted(os.path.splitext(f)[0] for f in os.listdir(d) if f.lower().endswith(".mp4"))
+
+
+def discover_rosbags(root):
+    """返回 input_root 下所有 rosbag_* 子目录。"""
+    if not os.path.isdir(root):
+        return []
+    return sorted(os.path.join(root, d) for d in os.listdir(root)
+                  if d.startswith("rosbag_") and os.path.isdir(os.path.join(root, d)))
+
+
+# --------------------------------------------------------------------------------------
+# 单 episode 处理(复用已加载的 gen，模型只加载一次)
+# --------------------------------------------------------------------------------------
+def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
+    """处理一个 episode：两次推理 + 计算指标 + 存盘(+可选出图)。返回指标 dict M 或 None。"""
+    rgb_path = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB", f"{episode}.mp4")
+    depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mkv")
     if not os.path.exists(depth_path):
-        depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{args.episode}.mp4")
-    parquet_path = os.path.join(rb, "data", "chunk-000", f"{args.episode}.parquet")
+        depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mp4")
+    parquet_path = os.path.join(rb, "data", "chunk-000", f"{episode}.parquet")
     info_json_path = os.path.join(rb, "meta", "info.json")
 
     for p in [rgb_path, depth_path, parquet_path, info_json_path]:
         if not os.path.exists(p):
-            raise FileNotFoundError(p)
+            print(f"[skip] {label}: 缺少文件 {p}")
+            return None
 
-    out_dir = os.path.join(args.out_dir, args.episode)
     os.makedirs(out_dir, exist_ok=True)
 
-    # 深度条件所需的相机内参。
     with open(info_json_path, "r", encoding="utf-8") as f:
         intr_np = np.array(json.load(f)["head_camera_intrinsic"], dtype=np.float32)
 
-    # 加载模型 + 配置(复用流水线的模型加载 / amp dtype 处理逻辑)。
-    config_path = os.path.join(_PROJECT_ROOT, "L3ROcc", "configs", "config.yaml")
-    model_dir = os.path.join(_PROJECT_ROOT, "ckpt")
-    gen = SimpleVideoDataGenerator(config_path, out_dir, model_dir, use_multimodal=True)
     interval = gen.interval
-    print(f"[cfg] interval={interval}  device={gen.device}  amp={gen.amp_dtype}")
-
-    # 构建输入(下采样后的 RGB + 公制传感器深度 + 缩放后的内参)。
     imgs, traj_len, conditions = load_images_as_tensor(
         rgb_path, interval=interval, PIXEL_LIMIT=args.pixel_limit,
         condit_depth_path=depth_path, intrinsics_np=intr_np, device=gen.device,
@@ -273,20 +293,19 @@ def main():
     imgs = imgs.to(gen.device)
     N = imgs.shape[0]
     if conditions.get("depths") is None:
-        raise RuntimeError("传感器深度加载失败(需要公制的 gray16le 深度)。")
-    sensor_d = conditions["depths"][0].float().cpu().numpy()  # (N, H, W) 单位：米
-    print(f"[data] kept {N} frames @ {imgs.shape[-2]}x{imgs.shape[-1]} ; sensor depth {sensor_d.shape}")
+        print(f"[skip] {label}: 传感器深度加载失败(需要公制 gray16le 深度)")
+        return None
+    sensor_d = conditions["depths"][0].float().cpu().numpy()  # (N, H, W) 米
+    print(f"\n=== {label} === kept {N} frames @ {imgs.shape[-2]}x{imgs.shape[-1]}")
 
-    # 两次模型推理。
     print("[run] Pi3X RGB-only ...")
     rgb = run_pi3x(gen, imgs, conditions=None)
     print("[run] Pi3X depth-conditioned ...")
     dc = run_pi3x(gen, imgs, conditions=conditions)
 
-    # 真值相机轨迹(下采样以与重建帧对齐)。
     gt_cam, gt_grip = load_gt_camera_positions(parquet_path, info_json_path, interval, N)
     n = min(N, len(gt_cam))
-    gt_cam = gt_cam[:n]
+    gt_cam, gt_grip = gt_cam[:n], gt_grip[:n]
     rgb_pos = rgb["cam_pos"][:n]
     dc_pos = dc["cam_pos"][:n]
 
@@ -294,31 +313,31 @@ def main():
     L_model = path_length(rgb_pos)
     L_model_dc = path_length(dc_pos)
 
-    # 理想修正系数(Umeyama 尺度，source->target 即 重建->真值)。
     c_gt_rgb = umeyama_scale(rgb_pos, gt_cam)
     if not np.isfinite(c_gt_rgb):
         c_gt_rgb = L_gt / max(L_model, 1e-9)
 
-    # 深度推算尺度 + 逐帧比值。
     s_pf_rgb, s_depth, _ = depth_scale_ratios(rgb["pred_depth"][:n], sensor_d[:n], rgb["conf"][:n],
                                               args.conf_thr, args.dmin, args.dmax)
     s_pf_dc, s_depth_dc, _ = depth_scale_ratios(dc["pred_depth"][:n], sensor_d[:n], dc["conf"][:n],
                                                 args.conf_thr, args.dmin, args.dmax)
 
-    # 相对真值的轨迹长度误差(独立的裁判量)。
-    e_model = abs(L_model - L_gt) / L_gt
-    e_depth = abs(s_depth * L_model - L_gt) / L_gt
-    e_model_dc = abs(L_model_dc - L_gt) / L_gt
+    L_gt_safe = max(L_gt, 1e-9)
+    e_model = abs(L_model - L_gt) / L_gt_safe
+    e_depth = abs(s_depth * L_model - L_gt) / L_gt_safe
+    e_model_dc = abs(L_model_dc - L_gt) / L_gt_safe
 
-    # 累计长度曲线。
     def cum(points, scale=1.0):
         d = np.linalg.norm(np.diff(points, axis=0), axis=1) * scale
         return np.concatenate([[0.0], np.cumsum(d)])
 
-    gt_grip = gt_grip[:n]
+    # 近静止 episode：相机几乎没动，尺度不可观测 → 标记并从汇总剔除。
+    skipped = bool(L_gt < args.min_motion)
+
     M = {
-        "episode": args.episode,
+        "episode": label,
         "n_frames": int(n),
+        "skipped": skipped,
         "metric_rgb": rgb["metric"],
         "metric_dc": dc["metric"],
         "s_depth": s_depth,
@@ -332,7 +351,6 @@ def main():
         "e_model": e_model,
         "e_depth": e_depth,
         "e_model_dc": e_model_dc,
-        # 尺度空间误差(修正系数 vs 理想系数)
         "scale_err_model": abs(1.0 - c_gt_rgb) / c_gt_rgb,
         "scale_err_depth": abs(s_depth - c_gt_rgb) / c_gt_rgb,
         "s_per_frame_rgb": s_pf_rgb.tolist(),
@@ -343,51 +361,160 @@ def main():
         "cum_dc": cum(dc_pos).tolist(),
     }
 
-    # ---- 打印结果 ----
-    print("\n================ RESULTS ================")
-    print(f"GT camera path length (odometry+handeye): {L_gt:.4f} m   (gripper-only {M['L_gt_gripper']:.4f} m)")
-    print(f"Pi3X metric head scalar : RGB={rgb['metric']:.4f}  depth-cond={dc['metric']:.4f}")
-    print(f"Ideal scale c_gt (Umeyama recon->GT)     : {c_gt_rgb:.4f}")
-    print(f"Depth-derived scale s_depth              : {s_depth:.4f}")
-    print("-----------------------------------------")
-    print(f"[model       ] L={L_model:.4f} m  ->  traj-len err = {e_model*100:5.2f}%   scale err = {M['scale_err_model']*100:5.2f}%")
-    print(f"[depth-scaled] L={s_depth*L_model:.4f} m  ->  traj-len err = {e_depth*100:5.2f}%   scale err = {M['scale_err_depth']*100:5.2f}%")
-    print(f"[model_dc    ] L={L_model_dc:.4f} m  ->  traj-len err = {e_model_dc*100:5.2f}%")
-    winner = min([("model", e_model), ("depth", e_depth), ("model_dc", e_model_dc)], key=lambda x: x[1])
-    print(f">>> Most accurate scale on this episode: '{winner[0]}'  ({winner[1]*100:.2f}% length error)")
-    print("=========================================\n")
+    print(f"GT path {L_gt:.4f} m (gripper {M['L_gt_gripper']:.4f}) | metric RGB={rgb['metric']:.3f} dc={dc['metric']:.3f}"
+          f" | c_gt={c_gt_rgb:.3f} s_depth={s_depth:.3f}")
+    print(f"[model {e_model*100:5.2f}%] [depth {e_depth*100:5.2f}%] [model_dc {e_model_dc*100:5.2f}%]"
+          + ("   (skipped: 近静止)" if skipped else ""))
 
     with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(M, f, indent=2)
-    print(f"[out] metrics -> {os.path.join(out_dir, 'metrics.json')}")
 
-    # 保存绘图所需的全部数据，然后在一个“从不导入 torch”的独立子进程中渲染 ——
-    # 在本 Windows 环境下，一旦 torch 的 MKL 驻留在同一进程，matplotlib 的 numpy/LAPACK
-    # 调用就会崩溃(0xc06d007f)。
-    npz_path = os.path.join(out_dir, "plotdata.npz")
-    np.savez_compressed(
-        npz_path,
-        frame_idx=np.arange(n) * interval,
-        pred_d_rgb=rgb["pred_depth"][:n].astype(np.float32),
-        pred_d_dc=dc["pred_depth"][:n].astype(np.float32),
-        sensor_d=sensor_d[:n].astype(np.float32),
-        conf_rgb=rgb["conf"][:n].astype(np.float32),
-        dmin=args.dmin, dmax=args.dmax, conf_thr=args.conf_thr,
-    )
-    print(f"[out] plot data -> {npz_path}")
+    # 仅在需要逐集出图、且非近静止时，保存绘图数据并渲染该集的 6 张图。
+    if do_plots and not skipped:
+        np.savez_compressed(
+            os.path.join(out_dir, "plotdata.npz"),
+            frame_idx=np.arange(n) * interval,
+            pred_d_rgb=rgb["pred_depth"][:n].astype(np.float32),
+            pred_d_dc=dc["pred_depth"][:n].astype(np.float32),
+            sensor_d=sensor_d[:n].astype(np.float32),
+            conf_rgb=rgb["conf"][:n].astype(np.float32),
+            dmin=args.dmin, dmax=args.dmax, conf_thr=args.conf_thr,
+        )
+        render(out_dir, "episode")
 
-    import subprocess
-    plot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_plot.py")
-    print("[viz] rendering figures in a clean subprocess ...")
-    plot_env = dict(os.environ)
-    plot_env["MKL_THREADING_LAYER"] = "SEQUENTIAL"
-    plot_env["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-    plot_env["OMP_NUM_THREADS"] = "1"
-    r = subprocess.run([sys.executable, plot_script, out_dir], capture_output=True, text=True, env=plot_env)
-    sys.stdout.write(r.stdout)
-    if r.returncode != 0:
-        sys.stderr.write(r.stderr)
-        print(f"[viz] plotting subprocess failed (rc={r.returncode}); data is in {npz_path}")
+    return M
+
+
+# --------------------------------------------------------------------------------------
+# 跨 episode 汇总
+# --------------------------------------------------------------------------------------
+def write_summary(results, out_root):
+    """把多 episode 的指标写成 summary.json / summary.csv，并返回 summary dict。"""
+    import csv
+    keys = ["episode", "n_frames", "L_gt", "L_model", "L_model_dc", "s_depth", "c_gt_rgb",
+            "metric_rgb", "metric_dc", "e_model", "e_depth", "e_model_dc",
+            "scale_err_model", "scale_err_depth"]
+    rows = [{k: M.get(k) for k in keys} for M in results]
+
+    def agg(key):
+        vals = [r[key] for r in rows if r[key] is not None and np.isfinite(r[key])]
+        if not vals:
+            return None
+        return {"mean": float(np.mean(vals)), "median": float(np.median(vals)), "std": float(np.std(vals))}
+
+    win_counts = {"model": 0, "depth": 0, "model_dc": 0}
+    for M in results:
+        w = min(("model", "depth", "model_dc"), key=lambda k: M[f"e_{k}"])
+        win_counts[w] += 1
+
+    summary = {
+        "n_episodes": len(rows),
+        "win_counts": win_counts,
+        "agg": {k: agg(k) for k in ["e_model", "e_depth", "e_model_dc",
+                                     "s_depth", "c_gt_rgb", "scale_err_model", "scale_err_depth"]},
+        "rows": rows,
+    }
+    with open(os.path.join(out_root, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    with open(os.path.join(out_root, "summary.csv"), "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows(rows)
+    return summary
+
+
+# --------------------------------------------------------------------------------------
+# 主流程
+# --------------------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser(description="对比 Pi3X 的“模型预测尺度”与“深度推算尺度”。")
+    ap.add_argument("--rosbag_dir", type=str,
+                    default=r"G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555",
+                    help="单个 rosbag 目录(未给 --input_root 时使用)。")
+    ap.add_argument("--input_root", type=str, default="",
+                    help="可选：包含多个 rosbag_* 的根目录，遍历其下所有 rosbag。")
+    ap.add_argument("--episode", type=str, default="episode_001",
+                    help="episode 名；用 'all' 处理该 rosbag 下全部 episode。")
+    ap.add_argument("--out_dir", type=str,
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_out"))
+    ap.add_argument("--conf_thr", type=float, default=0.1, help="像素有效所需的 Pi3X 最小置信度")
+    ap.add_argument("--dmin", type=float, default=0.25, help="可信传感器深度下限(米)")
+    ap.add_argument("--dmax", type=float, default=6.0, help="可信传感器深度上限(米)")
+    ap.add_argument("--min_motion", type=float, default=0.3,
+                    help="真值相机轨迹长度低于此值(米)的 episode 视为近静止，跳过(不计入汇总)。")
+    ap.add_argument("--per_episode_plots", action="store_true",
+                    help="批量时也为每个 episode 出 6 张图(默认仅单集出图，批量只出汇总图)。")
+    ap.add_argument("--cpu", action="store_true",
+                    help="强制 CPU 推理(显存 < ~8GB 时需要；在导入阶段即生效)。")
+    ap.add_argument("--pixel_limit", type=int, default=255000,
+                    help="送入 Pi3X 的每帧最大像素数。CPU 运行时调小(如 120000)可加速。")
+    args = ap.parse_args()
+
+    # 构建任务列表：(rosbag 目录, episode, 输出子目录, 标签)
+    jobs = []
+    if args.input_root:
+        rosbags = discover_rosbags(args.input_root)
+        if not rosbags:
+            print(f"[error] --input_root 下未找到 rosbag_* 目录: {args.input_root}")
+            return
+        for rb in rosbags:
+            eps = discover_episodes(rb) if args.episode == "all" else [args.episode]
+            for ep in eps:
+                name = os.path.basename(rb.rstrip("/\\"))
+                jobs.append((rb, ep, os.path.join(args.out_dir, name, ep), f"{name}__{ep}"))
+    else:
+        rb = args.rosbag_dir
+        eps = discover_episodes(rb) if args.episode == "all" else [args.episode]
+        for ep in eps:
+            jobs.append((rb, ep, os.path.join(args.out_dir, ep), ep))
+
+    if not jobs:
+        print("[error] 未发现任何 episode。检查 --rosbag_dir / --input_root / --episode。")
+        return
+    print(f"[plan] 共 {len(jobs)} 个 episode 待处理。")
+
+    # 单集默认出逐集图；批量默认只出汇总图(除非 --per_episode_plots)。
+    do_plots = args.per_episode_plots or (len(jobs) == 1)
+
+    # 模型只加载一次。
+    config_path = os.path.join(_PROJECT_ROOT, "L3ROcc", "configs", "config.yaml")
+    model_dir = os.path.join(_PROJECT_ROOT, "ckpt")
+    os.makedirs(args.out_dir, exist_ok=True)
+    gen = SimpleVideoDataGenerator(config_path, args.out_dir, model_dir, use_multimodal=True)
+    # Windows 预加载的 state dict 已被 load_state_dict 复制进模型，释放它(~5.4GB)给推理腾内存。
+    if sys.platform == "win32":
+        globals().pop("_PI3X_SD", None)
+        import gc
+        gc.collect()
+    print(f"[cfg] interval={gen.interval}  device={gen.device}  amp={gen.amp_dtype}")
+
+    results = []
+    for rb, ep, odir, label in jobs:
+        try:
+            M = process_episode(gen, rb, ep, odir, label, args, do_plots)
+        except Exception as e:
+            import traceback
+            print(f"[skip] {label}: {e}")
+            traceback.print_exc()
+            continue
+        if M is not None:
+            results.append(M)
+
+    # 汇总(批量时)。
+    if len(jobs) > 1:
+        kept = [M for M in results if not M.get("skipped")]
+        print(f"\n[summary] {len(kept)}/{len(results)} 个有效 episode 计入汇总 "
+              f"(跳过近静止 {len(results) - len(kept)} 个)。")
+        if kept:
+            s = write_summary(kept, args.out_dir)
+            for m in ("e_model", "e_depth", "e_model_dc"):
+                a = s["agg"][m]
+                if a:
+                    print(f"  {m:12s} mean={a['mean']*100:5.2f}%  median={a['median']*100:5.2f}%")
+            print(f"  win counts: {s['win_counts']}")
+            render(args.out_dir, "summary")
+        else:
+            print("[summary] 无有效 episode，跳过汇总。")
 
 
 if __name__ == "__main__":

@@ -28,8 +28,9 @@ from L3ROcc.utils import (
     voxel2points,
     voxels_to_pcd,
 )
-from third_party.pi3.pi3.models.pi3 import Pi3
-from third_party.pi3.pi3.models.pi3x import Pi3X
+# NOTE: Pi3 / Pi3X are imported lazily inside _load_pretrained_model (see there).
+# Importing the model modules (dinov2 / flash-attention CUDA init) at top level breaks
+# safetensors' mmap load on Windows; the lazy import lets us pre-load weights to CPU first.
 from third_party.pi3.pi3.utils.basic import (  # Assuming you have a helper function
     write_ply,
 )
@@ -74,12 +75,12 @@ class DataGenerator:
         # FlashAttention SDPA path, which is not built into every torch distribution.
         self.amp_dtype = self._select_amp_dtype()
         self.use_multimodal = use_multimodal
-        if use_multimodal:
-            ckpt_path = os.path.join(model_dir, "pi3x")
-            self.model = Pi3X.from_pretrained(ckpt_path).to(self.device).eval()
-        else:
-            ckpt_path = os.path.join(model_dir, "pi3")
-            self.model = Pi3.from_pretrained(ckpt_path).to(self.device).eval()
+        ckpt_path = os.path.join(model_dir, "pi3x" if use_multimodal else "pi3")
+        self.model = (
+            self._load_pretrained_model(ckpt_path, use_multimodal)
+            .to(self.device)
+            .eval()
+        )
         print(f"Loaded {'Pi3X (multimodal)' if use_multimodal else 'Pi3 (RGB-only)'} from {ckpt_path}")
 
         self.free_label = 0
@@ -111,6 +112,24 @@ class DataGenerator:
             maxlen=self.history_len
         )  # Fixed-length queue for sliding window
         self.save_path = self.save_dir
+
+    def _load_pretrained_model(self, ckpt_path, use_multimodal):
+        """Load Pi3X / Pi3 weights via the standard ``from_pretrained`` (returns CPU model;
+        caller moves it to device).
+
+        The model class is imported lazily here (not at module top) for two reasons:
+        (1) keep import side effects out of ``import L3ROcc.base``; and (2) on Windows,
+        ``from_pretrained`` segfaults unless an early importer has pre-loaded the safetensors
+        weights to CPU *before* the heavy imports (open3d / the model module) and monkeypatched
+        ``from_pretrained`` -- see ``tools/exp_scale/exp_scale_compare.py``. Because the import
+        is lazy, that monkeypatch (done before this module's deps are constructed) takes effect.
+        On Linux/server this is just the native fast path.
+        """
+        if use_multimodal:
+            from third_party.pi3.pi3.models.pi3x import Pi3X
+            return Pi3X.from_pretrained(ckpt_path)
+        from third_party.pi3.pi3.models.pi3 import Pi3
+        return Pi3.from_pretrained(ckpt_path)
 
     def _select_amp_dtype(self):
         """Choose the autocast dtype for model inference.

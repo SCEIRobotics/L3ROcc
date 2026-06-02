@@ -124,19 +124,23 @@ if __name__ == "__main__":
     )
 
     # ---------- Batch Processing Inputs ----------
+    # 服务器(Linux)上请用 CLI 覆盖为实际路径，例如：
+    #   python tools/run_normal_data_occ.py --input_root /data/lerobot/20260601 --output_root /data/l3rocc/20260601
     parser.add_argument(
         "--input_root", type=str, default=str(Path(r"G:\vln_real_data\lerobot_data\20260601")),
-        help="Root directory containing multiple rosbags (e.g., rosbag_xxx).",
+        help="包含多个 rosbag_* 的根目录(批量模式)。服务器上用 CLI 覆盖为 Linux 路径。",
     )
     parser.add_argument(
         "--output_root", type=str, default=str(Path(r"G:\vln_collect_data\l3rocc_data\20260601")),
-        help="Root directory where processed outputs will be saved.",
+        help="批量模式输出根目录。服务器上用 CLI 覆盖为 Linux 路径。",
     )
 
     # ---------- Single Process Inputs (Fallback) ----------
+    # 默认空 -> 走批量模式(遍历 --input_root)。要处理单个视频时显式传 --video_path。
+    # 单文件示例(本机)：{default_video_path}
     parser.add_argument(
-        "--video_path", type=str, default=default_video_path,
-        help="Path to the RGB video file to process. If empty, uses batch mode from input_root.",
+        "--video_path", type=str, default="",
+        help="单个 RGB 视频路径。留空(默认)则走 --input_root 批量模式。",
     )
     parser.add_argument(
         "--condit_depth_path", type=str, default=default_condit_depth_path,

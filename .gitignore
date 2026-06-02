@@ -38,3 +38,4 @@ example.py
 pyproject.toml
 
 /tools/exp_scale/exp_out
+.claude
