@@ -14,8 +14,6 @@
 每个变体都用“相机轨迹长度 vs 里程计真值长度”的相对误差来打分，
 并输出逐帧诊断曲线和若干可视化图。
 
-运行(在项目根目录、L3ROcc conda 环境内)：
-    python tools/exp_scale/exp_scale_compare.py --rosbag_dir G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555 --episode episode_001
 """
 
 import os
@@ -430,7 +428,7 @@ def main():
     ap = argparse.ArgumentParser(description="对比 Pi3X 的“模型预测尺度”与“深度推算尺度”。")
     ap.add_argument("--rosbag_dir", type=str,
                     default=r"G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555",
-                    help="单个 rosbag 目录(未给 --input_root 时使用)。")
+                    help="单个 rosbag 目录(未给 --input_root 时使用)。") # 该rosbag目录已经过lerobot_data_builder.py预处理
     ap.add_argument("--input_root", type=str, default="",
                     help="可选：包含多个 rosbag_* 的根目录，遍历其下所有 rosbag。")
     ap.add_argument("--episode", type=str, default="episode_001",

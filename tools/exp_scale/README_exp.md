@@ -1,6 +1,12 @@
+# Pi3X Scale Accuracy Study — `exp_scale_compare`
+
+> **TL;DR**: Pi3X's **RGB-only metric head is more accurate** than a scale derived from real depth maps (mean trajectory error 13.3% vs 21.8%). Depth conditioning (`model_dc`) achieves the best median accuracy (8.0%) but with higher variance. See [Results](#7-输出) for full details.
+
+---
+
 # Pi3X 尺度对比实验说明（exp_scale_compare）
 
-验证一个问题：对于 Pi3X 的三维重建，**哪个“绝对尺度(scale)”更准** ——
+验证一个问题：对于 Pi3X 的三维重建，**哪个”绝对尺度(scale)”更准** ——
 是模型自己预测的尺度（`metric` 头），还是用相机真实深度图推算出来的尺度？
 
 - 主脚本：[`exp_scale_compare.py`](exp_scale_compare.py) —— 跑推理、算指标、存数据
@@ -190,7 +196,7 @@ python tools/exp_scale/exp_scale_compare.py --rosbag_dir <rosbag目录> --episod
 python tools/exp_scale/exp_scale_compare.py --input_root <含多个 rosbag_* 的根目录> --episode all
 ```
 
-**本机 6GB 显卡 / 无 GPU（CPU 回退，需降分辨率）：**
+**小内存显卡（eg., 6G） / 无 GPU（CPU 回退，需降分辨率）：**
 ```bash
 python tools/exp_scale/exp_scale_compare.py --episode episode_000 --cpu --pixel_limit 40000
 ```
@@ -243,26 +249,7 @@ python tools/exp_scale/exp_scale_compare.py --episode episode_000 --cpu --pixel_
 
 ---
 
-## 8. 已有结果（episode_000，CPU @ 168×224，仅供参考）
-
-| 尺度来源 | 重建长度 | 轨迹长度误差 | 纯尺度误差 |
-|---|---|---|---|
-| model（RGB metric 头） | 1.79 m | 21.6% | 16.9% |
-| **depth（RGB+传感器）** | 1.70 m | **15.5%** ✅ | 11.1% |
-| model_dc（深度条件） | 1.70 m | 15.6% | — |
-
-- 真值轨迹 **1.47 m**；模型自身尺度**偏大约 17~21%**。
-- 用深度（后处理重缩放 **或** 作条件输入）都能降到约 15.5%，二者基本持平。
-- **关键现象**（见图 3）：模型深度比传感器大约 5%（比值≈0.95，稳定无漂移），
-  但轨迹真值要求的修正是 **0.855** —— 即**深度传感器与里程计本身对尺度也有约 11% 的分歧**。
-  以里程计为准时 depth 更接近真值，但两者都未完全命中。
-
-> ⚠️ 注意：上述为 6GB 显卡限制下的**低分辨率 CPU 结果**，模型 metric 头可能被低分辨率不公平地拖累。
-> 定论请在服务器全分辨率下复跑（去掉 `--cpu`）。单一近似直线 episode，建议多 episode 复核。
-
----
-
-## 9. 跨平台说明（Windows 规避已内置；Linux 走原生快路径）
+## 8. 跨平台说明（Windows 规避已内置；Linux 走原生快路径）
 
 1. **模型加载（已集中到 `L3ROcc/base.py:_load_pretrained_model`）** —— Linux 直接原生
    `from_pretrained`；Windows 上 `from_pretrained` 会段错误（先建模型再加载权重，破坏 safetensors
@@ -276,3 +263,22 @@ python tools/exp_scale/exp_scale_compare.py --episode episode_000 --cpu --pixel_
    `umeyama_scale` 改用闭式公式（不做 SVD）的原因。
 4. **数据生成（`tools/run_normal_data_occ.py`）** —— `--video_path` 默认空 → 走 `--input_root`
    批量；要单文件时显式传 `--video_path`。服务器上用 CLI 覆盖 `--input_root`/`--output_root` 为 Linux 路径。
+
+---
+
+## 9. Experiment Results (English Summary)
+
+**Dataset**: 32 valid episodes from real robot data; 12 near-static episodes excluded (`L_gt < 0.3 m`). Ground truth from robot odometry — independent of both the vision model and depth sensor.
+
+| Scale Method | Mean Error | Median Error | Std Dev | Win Count (32 eps) |
+|---|---|---|---|---|
+| `model` — Pi3X metric head, RGB-only | 13.34% | 9.64% | 9.68% | 12 |
+| `depth` — Derived from sensor depth map | 21.80% | 20.50% | 5.98% | 5 |
+| `model_dc` — Pi3X with depth as input | **12.71%** | **8.02%** | 11.08% | **15** |
+
+**Observations:**
+1. **Sensor depth maps have a systematic ~+8% positive bias** (`s_depth` mean ≈ 1.08), making the depth-derived scale consistently worse than the model's own prediction.
+2. The **Pi3X metric head (RGB-only)** is the most reliable baseline — low median error (9.6%) with moderate variance.
+3. **Depth conditioning (`model_dc`)** achieves the best median (8.0%) and most wins, but shows higher variance (std 11.1%). It degrades in low-texture scenes (`c_gt_rgb < 0.82`).
+
+**Recommendation**: Use `--model_type pi3x --use_depth false` by default. Enable `--use_depth true` only with well-calibrated depth data in high-texture environments.
