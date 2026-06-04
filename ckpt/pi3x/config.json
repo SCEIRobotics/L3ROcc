@@ -1,0 +1,4 @@
+{
+  "decoder_size": "large",
+  "pos_type": "rope100"
+}

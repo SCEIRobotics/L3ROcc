@@ -2,6 +2,7 @@ import math
 import os
 import os.path as osp
 from copy import deepcopy
+from itertools import islice
 
 import cv2
 import matplotlib.pyplot as plt
@@ -190,6 +191,7 @@ def ransac_pcd_registration(
     for _ in range(max_iterations):
         # 1. Random sampling: Select points
         # For simplicity, select 'min_inliers' random points; assume non-collinear for now.
+        import random
         sample_indices = random.sample(range(num_points), min_inliers)
         src_sample = src_pts[sample_indices]
         dst_sample = dst_pts[sample_indices]
@@ -838,10 +840,19 @@ def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
     return torch.stack(tensor_list, dim=0)
 
 
-def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
+def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
+                          condit_depth_path="videos/observation.images.depth", intrinsics_np=None, device='cpu'):
     """
     Loads images from a directory or video, resizes them to a uniform size,
     then converts and stacks them into a single [N, 3, H, W] PyTorch tensor.
+
+    Optionally loads conditional depth maps and camera intrinsics (used by Pi3X
+    multimodal conditioning). Returns an additional dict of conditions.
+
+    Returns:
+        images_tensor (torch.Tensor): RGB frames, shape [N, 3, H, W], values in [0, 1].
+        all_frames (int): Total number of frames in the source (before interval subsampling).
+        conditions (dict): {'poses', 'depths', 'intrinsics'} ready to splat into Pi3X.
     """
     sources = []
     all_frames = -1
@@ -887,7 +898,11 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
 
     if not sources:
         print("No images found or loaded.")
-        return torch.empty(0), 0
+        return torch.empty(0), 0, {
+            'poses': None,            # (1, N, 4, 4)
+            'depths': None,           # (1, N, H, W)
+            'intrinsics': None,       # (1, N, 3, 3)
+        }
 
     print(f"Found {len(sources)} images/frames. Processing...")
 
@@ -924,7 +939,101 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
 
     if not tensor_list:
         print("No images were successfully processed.")
-        return torch.empty(0), 0
+        return torch.empty(0), 0, {
+            'poses': None,
+            'depths': None,
+            'intrinsics': None,
+        }
 
     # --- 4. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
-    return torch.stack(tensor_list, dim=0), all_frames
+    images_tensor = torch.stack(tensor_list, dim=0)
+
+    N_out = images_tensor.shape[0]  # The actual number of successfully loaded RGB frames
+
+    out_poses = None
+    out_depths = None
+    out_intrinsics = None
+
+    # Calculate resize ratios for geometry alignment.
+    # (Must be calculated here because TARGET_W/H might have been adjusted by the while loop above.)
+    scale_x = TARGET_W / W_orig
+    scale_y = TARGET_H / H_orig
+
+    # --- 5. Build intrinsic condition (rescaled to the model input resolution) ---
+    if intrinsics_np is not None and isinstance(intrinsics_np, np.ndarray) and intrinsics_np.shape == (3, 3):
+        # Work on a copy so the caller's array is not mutated in place.
+        intr = intrinsics_np.astype(np.float32).copy()
+        intr[0, 0] *= scale_x  # fx
+        intr[0, 2] *= scale_x  # cx
+        intr[1, 1] *= scale_y  # fy
+        intr[1, 2] *= scale_y  # cy
+
+        camera_tensor = torch.from_numpy(intr).float()  # float32
+        out_intrinsics = camera_tensor[None].repeat(N_out, 1, 1)[None].to(device)  # (1, N, 3, 3)
+
+    # --- 6. Build depth condition ---
+    if condit_depth_path is not None and os.path.exists(condit_depth_path):
+        import av
+        resized_depths_list = []
+        ext = condit_depth_path.lower()
+        if ext.endswith(".mkv") or ext.endswith(".mp4"):
+            # Decode as gray16le via PyAV (works for MKV and depth-encoded MP4).
+            # Values in 16-bit unsigned mm -> divide by 1000 to get meters.
+            try:
+                container = av.open(str(condit_depth_path))
+                video_stream = container.streams.video[0]
+                for av_frame in islice(container.decode(video_stream), 0, None, interval):
+                    d_map = av_frame.to_ndarray(format='gray16le')
+                    d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                    d_resized = d_resized.astype(np.float32) / 1000.0  # mm -> m
+                    d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
+                    resized_depths_list.append(torch.from_numpy(d_resized))
+                container.close()
+            except Exception as e:
+                # Fallback: cv2 8-bit read -- depth will be relative [0,1], not metric.
+                # This happens when the depth video uses a standard 8-bit codec.
+                print(f"[Warning] gray16le decode failed ({e}). "
+                      "Falling back to cv2 8-bit reading -- depth will NOT be metric (relative [0,1]).")
+                resized_depths_list = []
+                cap = cv2.VideoCapture(condit_depth_path)
+                if not cap.isOpened():
+                    raise IOError(f"Cannot open depth video: {condit_depth_path}")
+                frame_idx = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    if frame_idx % interval == 0:
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        d_resized = cv2.resize(gray, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                        d_resized = d_resized.astype(np.float32) / 255.0
+                        d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
+                        resized_depths_list.append(torch.from_numpy(d_resized))
+                    frame_idx += 1
+                cap.release()
+        else:
+            print(f"[Warning] Unsupported depth file extension: {condit_depth_path}. "
+                  "Expected .mkv or .mp4. Skipping depth conditioning.")
+
+        n_depth = len(resized_depths_list)
+        if n_depth > 0:
+            if n_depth != N_out:
+                if n_depth < N_out:
+                    # Pad missing frames with zero maps -- Pi3X treats 0-depth as invalid (no conditioning).
+                    zero_map = torch.zeros(TARGET_H, TARGET_W, dtype=torch.float32)
+                    resized_depths_list.extend([zero_map] * (N_out - n_depth))
+                    print(f"[Warning] Depth frames ({n_depth}) < RGB frames ({N_out}). "
+                          f"Padding last {N_out - n_depth} frames with zeros (no depth conditioning).")
+                else:
+                    resized_depths_list = resized_depths_list[:N_out]
+                    print(f"[Warning] Depth frames ({n_depth}) > RGB frames ({N_out}). "
+                          f"Truncating to {N_out}.")
+            out_depths = torch.stack(resized_depths_list, dim=0)[None].to(device)  # (1, N, H, W)
+    elif condit_depth_path is not None:
+        print(f"[Warning] Depth path does not exist: {condit_depth_path}. Skipping depth conditioning.")
+
+    return images_tensor, all_frames, {
+        'poses': out_poses,            # (1, N, 4, 4)
+        'depths': out_depths,          # (1, N, H, W)
+        'intrinsics': out_intrinsics,  # (1, N, 3, 3)
+    }

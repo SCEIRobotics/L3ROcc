@@ -26,13 +26,15 @@
 This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its foundational reconstruction engine, and implements a fully automated pipeline for data labeling and alignment that is customized for navigation learning tasks. All processed data adheres to the **LeRobotDataset v2.1** specification. In practical testing, processing a 16-second video segment using this pipeline requires roughly 15 seconds to produce occupancy (occ) and mask data.
 
 ## 📢 What's New (Latest Updates)
+- **Dual-Model & Depth Conditioning:** Now supports both `Pi3` (RGB-only) and `Pi3X` (multimodal). Pi3X can accept an optional camera depth map as conditioning input (`--model_type pi3x --use_depth true`), further improving absolute scale accuracy when high-quality depth data is available.
 - **Physical Scale Alignment:** The generation pipeline now applies a dynamic scaling factor to the Pi3 model's point cloud output, ensuring the reconstructed 3D scenes are strictly aligned with real-world metric dimensions.
 - **Base Frame Occupancy:** Per-frame occupancy data is now explicitly transformed and anchored to the **robot base coordinate system** (rather than the local camera frame), significantly streamlining downstream embodied AI navigation and control tasks.
 - **Smart Data Integrity Checks:** Introduced strict file existence validation. The pipeline now verifies all expected output artifacts for a trajectory before skipping, preventing incomplete or corrupted data generation during batch processing.
 - **Enhanced Code Robustness:** Refactored the Object-Oriented structure to standardize subclass method overrides and decoupled absolute paths into relative paths for seamless open-source deployment.
 
 ## ✨ Key Features
-* **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and scale-invariant globally point clouds from RGB video streams.
+* **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and metric-scale point clouds from RGB video streams.
+* **Flexible Model Selection**: Two backbone options — `Pi3` (RGB-only, lightweight) via `--model_type pi3`, or `Pi3X` (multimodal) via `--model_type pi3x`. Pi3X uniquely supports optional depth conditioning (`--use_depth true`) for improved absolute scale alignment.
 * **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids.
 * **Visibility Analysis**: Performs real-time ray casting based on intrinsic and extrinsic parameters of camera to compute visible regions (Visible Masks) and occlusion relationships.
 * **4D Data Serialization**:
@@ -42,8 +44,8 @@ This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 * **Professional Visualization**: Mayavi-based 3D rendering tools for generating side-by-side comparison videos of point clouds, trajectories, and occupancy.
 
 ## 💡 Future Work 
-- [ ] **Semantic Point Cloud**: Integrate semantic segmentation, and instance segmentation to enhance reconstruction quality.
-- [ ] **Multi-modal Fusion**: Integrate depth maps to enhance reconstruction quality.
+- [ ] **Semantic Point Cloud**: Integrate semantic segmentation and instance segmentation to enhance reconstruction quality.
+- [x] **Multi-modal Fusion**: Pi3X now supports depth map conditioning (`--model_type pi3x --use_depth true`) for improved absolute scale accuracy. See [Scale Experiment](#-scale-accuracy-study-pi3x-metric-head-vs-depth-derived-scale) for benchmark results.
 
 
 ## 🚀 Quick Start
@@ -74,19 +76,55 @@ conda install -c conda-forge mayavi
 ```
 (Note: Ensure you have a working OpenGL environment for Mayavi rendering.)
 
-### 2.Model Checkpoints
-Place the $\pi^3$ model weights (model.safetensors) and configuration files in the ckpt/ directory at the project root. If the automatic download from Hugging Face is slow, you can download the model checkpoint manually from [here](https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors).
+### 2. Model Checkpoints
+This project supports two model variants. Place the weights under `ckpt/` at the project root:
+
+```
+ckpt/
+├── pi3/                   # Base Pi3 weights (RGB-only)
+│   ├── model.safetensors
+│   └── config.json
+└── pi3x/                  # Pi3X multimodal weights (RGB-only or RGB+depth)
+    ├── model.safetensors
+    └── config.json
+```
+
+| Model | Input | HuggingFace ID | Direct Download |
+|-------|-------|----------------|-----------------|
+| **Pi3** | RGB only | [`yyfz233/Pi3`](https://huggingface.co/yyfz233/Pi3) | [model.safetensors](https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors) |
+| **Pi3X** | RGB (+ optional depth) | [`yyfz233/Pi3X`](https://huggingface.co/yyfz233/Pi3X) | [model.safetensors](https://huggingface.co/yyfz233/Pi3X/resolve/main/model.safetensors) |
+
+> If automatic download from Hugging Face is slow, use the direct download links above and place the files in the corresponding subdirectory.
 
 ### 3. Run Example （The pipeline supports three primary modes）:
-#### Mode A: Generate Visualized Dynamic Video Use this to create side-by-side comparison videos from your own footage with history frames.
+
+#### Mode A: Generate Visualized Dynamic Video
+Use this to create side-by-side comparison videos from your own footage with history frames.
+
 ```bash
-python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --pcd_save True --mode visual --mesh False
+# Pi3X RGB-only (default, recommended)
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
+    --save_dir data/examples/outputs/ --model_type pi3x --use_depth false \
+    --pcd_save True --mode visual --mesh False
+
+# Pi3X with depth conditioning (requires depth video + intrinsic JSON)
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
+    --condit_depth_path data/examples/depth.mkv \
+    --condit_intr_path data/examples/info.json \
+    --save_dir data/examples/outputs/ --model_type pi3x --use_depth true \
+    --pcd_save True --mode visual --mesh False
 ```
-#### Mode B: Generate LeRobot-compatible Data Use this to generate the standard dataset structure for model training.
+
+#### Mode B: Generate LeRobot-compatible Data
+Use this to generate the standard dataset structure for model training.
 ```bash
-python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 --save_dir data/examples/outputs/ --pcd_save True --mode run --mesh False
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
+    --save_dir data/examples/outputs/ --model_type pi3x --use_depth false \
+    --pcd_save True --mode run --mesh False
 ```
-#### Mode C: Batch Process InternData-N1 Dataset To process the full InternData-N1 directory with scale alignment enabled.
+
+#### Mode C: Batch Process InternData-N1 Dataset
+To process the full InternData-N1 directory with scale alignment enabled.
 This mode supports **breakpoint resumption** with the following logic:
 - `mask_sequence.npz` (final result file) exists: Skip processing and continue with the next trajectory.
 - `overwrite=True`: Force reprocessing and overwrite existing files.
@@ -94,6 +132,14 @@ This mode supports **breakpoint resumption** with the following logic:
 ```bash
 python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data --output_root data/examples/small_vln_n1_4/traj_data --pcd_save True --overwrite False --mesh False
 ```
+
+**Model selection summary:**
+
+| `--model_type` | `--use_depth` | Description |
+|---|---|---|
+| `pi3` | `false` | Pi3, RGB-only (lightweight) |
+| `pi3x` | `false` | Pi3X, RGB-only with metric head (recommended default) |
+| `pi3x` | `true` | Pi3X + depth conditioning (best scale accuracy with quality depth data) |
 
 
 ## 🛠️ Pipeline Details
@@ -174,6 +220,28 @@ Outputs generated by the `visual_pipeline` are tailored for rendering and manual
 | `merge_ply_sequence_world.ply` | Files per frame in World Coordinates for 3D inspection. |
 | `occ_only_cam_npy.npy` | Files per frame containing only visible OCC in Camera Coordinates for rendering. |
 | `occ_only_cam_ply.ply` | Files per frame containing only visible OCC for 3D inspection. |
+
+## 🔬 Scale Accuracy Study: Pi3X Metric Head vs. Depth-Derived Scale
+
+We benchmarked two approaches for obtaining **absolute metric scale** in Pi3X 3D reconstruction:
+the model's own **metric head** (RGB-only) vs. a scale factor **derived from real camera depth maps**.
+
+**Setup**: 32 valid robot episodes (12 near-static episodes excluded); ground truth from robot odometry — independent of both the vision model and the depth sensor.
+
+| Scale Method | Description | Mean Error | Median Error | Std Dev | Win Rate |
+|---|---|---|---|---|---|
+| `model` | Pi3X metric head, RGB-only | 13.34% | 9.64% | 9.68% | 12/32 |
+| `depth` | Scale derived from sensor depth map | 21.80% | 20.50% | 5.98% | 5/32 |
+| `model_dc` | Pi3X with depth as conditioning input | **12.71%** | **8.02%** | 11.08% | **15/32** |
+
+**Key findings:**
+- The **Pi3X metric head (RGB-only) substantially outperforms the depth-derived scale** (mean 13.3% vs 21.8%). Sensor depth maps show a systematic ~+8% positive bias relative to odometry ground truth.
+- **Depth conditioning (`model_dc`) achieves the best median accuracy** (8.02%, 15/32 wins), but with higher variance — most beneficial when scene texture is rich (visual quality `c_gt_rgb > 0.9`).
+- **Recommendation**: Use `--model_type pi3x --use_depth false` as a reliable default. Enable `--use_depth true` only when you have high-quality, well-calibrated depth data.
+
+> Full methodology and per-episode analysis: [`tools/exp_scale/README_exp.md`](tools/exp_scale/README_exp.md)
+
+---
 
 ## 📺 Visualization & Toolbox
 

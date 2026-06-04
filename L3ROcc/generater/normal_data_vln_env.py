@@ -1,4 +1,3 @@
-import fcntl
 import json
 import os
 import shutil
@@ -40,8 +39,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                     └── tasks.jsonl
     """
 
-    def __init__(self, config_path, save_dir, model_dir):
-        super().__init__(config_path, save_dir, model_dir)
+    def __init__(self, config_path, save_dir, model_dir, use_multimodal=True):
+        super().__init__(config_path, save_dir, model_dir, use_multimodal=use_multimodal)
         self.default_group = "custom_videos"
         self.default_traj_name = "trajectory_0"
 
@@ -290,10 +289,19 @@ class SimpleVideoDataGenerator(DataGenerator):
         except Exception as e:
             print(f"Warning: Failed to copy video file: {e}")
 
-    def run_pipeline(self, input_path, pcd_save=True, mesh=False, T_cam2base=None):
+    def run_pipeline(self, input_path, condit_depth_path=None, intrinsics_np=None,
+                     pcd_save=True, mesh=False, T_cam2base=None, max_frames=None):
         print(f"Processing video: {input_path}")
 
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
+            input_path, condit_depth_path, intrinsics_np
+        )
+
+        # Quick verification: cap the trajectory so the full data path runs on only a few frames.
+        if max_frames is not None and max_frames > 0 and len(self.camera_pose) > max_frames:
+            print(f"[Quick] Truncating trajectory from {len(self.camera_pose)} to "
+                  f"{max_frames} frames for fast pipeline verification.")
+            self.camera_pose = self.camera_pose[:max_frames]
 
         if pcd_save:
             print("Computing 4D sequence data...")

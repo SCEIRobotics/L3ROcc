@@ -36,3 +36,6 @@ img_dir_to_video.py
 demo_gradio.py
 example.py
 pyproject.toml
+
+/tools/exp_scale/exp_out
+.claude

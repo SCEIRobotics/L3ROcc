@@ -1,4 +1,4 @@
-import argparse
+from argparse import ArgumentParser
 import os
 import sys
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
 
     # ==========================================================================
     # 1. Configuration & Argument Parsing
-    # ==========================================================================
+    # ==========================================================================    
     parse = ArgumentParser()
     parse.add_argument(
         "--visual_path",
