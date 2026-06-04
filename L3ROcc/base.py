@@ -164,7 +164,10 @@ class DataGenerator:
         Args:
             input_path (str): Path to the input video file.
             condit_depth_path (str): Path to the conditional depth map (used by Pi3X only).
-            intrinsics_np (np.ndarray): 3x3 intrinsic matrix (used by Pi3X only).
+            intrinsics_np (np.ndarray): 3x3 intrinsic matrix at the ORIGINAL video resolution.
+                - When use_multimodal=True, it is rescaled to model input size and fed to Pi3X.
+                - In both modes, the rescaled K replaces the DLT-estimated K in ``camera_intric_rs``
+                  so the downstream Parquet stores the calibrated K instead of the model's estimate.
 
         Returns:
             tuple:
@@ -182,6 +185,10 @@ class DataGenerator:
             device=self.device,
         )
         imgs = imgs.to(self.device)  # [N, 3, H, W]
+
+        # ``K_rescaled`` is metadata (numpy K at resized resolution), not a Pi3X kwarg —
+        # pop it before splatting so ``model(**conditions)`` does not see an unknown argument.
+        K_rescaled = conditions.pop("K_rescaled", None)
 
         # Run model inference to get point clouds and camera poses
         print("Running model inference...")
@@ -244,10 +251,19 @@ class DataGenerator:
         ).permute(0, 2, 3, 1)
 
         norm_cam_ray_cam_coords = norm_cam_ray_cam_coords[0]
-        # Estimate camera intrinsics via DLT
-        self.camera_intric_rs = estimate_intrinsics(
-            res["local_points"][0][ref_cam_index]
-        ).cpu().numpy()
+        # Camera intrinsics at the resized model resolution.
+        # Prefer the calibrated K (rescaled to model input size) when an external intrinsic
+        # was supplied — the MVP experiment (tools/exp_intrinsic) showed RGB-only Pi3X
+        # back-calculates fx/fy with a systematic ~2-3% bias, while the calibrated K is
+        # known to be more accurate. Fall back to DLT estimation only when no real K is given.
+        if K_rescaled is not None:
+            self.camera_intric_rs = K_rescaled.astype(np.float32)
+            print(f"[intrinsics] using calibrated K (rescaled to model input):\n{self.camera_intric_rs}")
+        else:
+            self.camera_intric_rs = estimate_intrinsics(
+                res["local_points"][0][ref_cam_index]
+            ).cpu().numpy()
+            print(f"[intrinsics] no real K provided; using DLT-estimated K:\n{self.camera_intric_rs}")
 
         if torch.isnan(pcd).any() or torch.isinf(pcd).any():
             print("[Reconstruction] NaN/Inf detected in Model Output! Cleaning...")

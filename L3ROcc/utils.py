@@ -902,6 +902,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
             'poses': None,            # (1, N, 4, 4)
             'depths': None,           # (1, N, H, W)
             'intrinsics': None,       # (1, N, 3, 3)
+            'K_rescaled': None,
         }
 
     print(f"Found {len(sources)} images/frames. Processing...")
@@ -943,6 +944,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
             'poses': None,
             'depths': None,
             'intrinsics': None,
+            'K_rescaled': None,
         }
 
     # --- 4. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
@@ -953,6 +955,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
     out_poses = None
     out_depths = None
     out_intrinsics = None
+    out_K_rescaled = None  # numpy (3,3) at TARGET_W x TARGET_H resolution; metadata, not a model kwarg
 
     # Calculate resize ratios for geometry alignment.
     # (Must be calculated here because TARGET_W/H might have been adjusted by the while loop above.)
@@ -970,6 +973,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
 
         camera_tensor = torch.from_numpy(intr).float()  # float32
         out_intrinsics = camera_tensor[None].repeat(N_out, 1, 1)[None].to(device)  # (1, N, 3, 3)
+        out_K_rescaled = intr  # keep numpy copy so downstream can save it as ground-truth K
 
     # --- 6. Build depth condition ---
     if condit_depth_path is not None and os.path.exists(condit_depth_path):
@@ -1036,4 +1040,8 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         'poses': out_poses,            # (1, N, 4, 4)
         'depths': out_depths,          # (1, N, H, W)
         'intrinsics': out_intrinsics,  # (1, N, 3, 3)
+        # Metadata — NOT a Pi3X kwarg. Callers that do ``model(**conditions)`` must pop this first.
+        # Set only when an external real intrinsic was provided; downstream uses it as the
+        # authoritative K (at resized resolution) instead of the model's back-calculated estimate.
+        'K_rescaled': out_K_rescaled,  # numpy (3, 3) or None
     }

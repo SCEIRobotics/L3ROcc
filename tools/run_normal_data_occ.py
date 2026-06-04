@@ -40,6 +40,7 @@ def run_normal_data_pipeline(args):
     pcd_save       = args.pcd_save
     mesh           = args.mesh
     use_depth      = args.use_depth          # bool
+    use_intrinsic  = args.use_intrinsic      # bool, decoupled from use_depth
     use_multimodal = args.model_type == "pi3x"
 
     # Quick verification: process only the first N frames to validate the whole data path fast.
@@ -52,11 +53,18 @@ def run_normal_data_pipeline(args):
     if use_depth and not use_multimodal:
         print("[Warning] use_depth=True but model_type='pi3'. "
               "Pi3 does NOT support depth conditioning — depth input will be ignored by the model.")
-    if not use_depth and use_multimodal:
-        print("[Info] model_type='pi3x' but use_depth=False. "
-              "Pi3X will run in RGB-only mode (no depth / intrinsic conditions).")
+    if use_intrinsic and not use_multimodal:
+        print("[Info] use_intrinsic=True but model_type='pi3'. "
+              "Pi3 does NOT support intrinsic conditioning, but the calibrated K will still be "
+              "saved to the dataset (overriding the model's back-calculated K).")
+    if not use_depth and not use_intrinsic and use_multimodal:
+        print("[Info] model_type='pi3x' with no depth/intrinsic. "
+              "Pi3X runs in RGB-only mode; saved K will be the model's back-calculated estimate.")
 
     # ================= 2. Build depth / intrinsic inputs  =================
+    # Depth and intrinsic are now decoupled — each is loaded only if its own flag is on.
+
+    condit_depth_path = None
     if use_depth:
         condit_depth_path = args.condit_depth_path
         if not os.path.isfile(condit_depth_path):
@@ -64,7 +72,8 @@ def run_normal_data_pipeline(args):
                   "Reconstruction will proceed without depth conditioning.")
             condit_depth_path = None
 
-        intrinsics_np = None
+    intrinsics_np = None
+    if use_intrinsic:
         if os.path.isfile(args.condit_intr_path) and args.condit_intr_path.endswith(".json"):
             with open(args.condit_intr_path, "r", encoding="utf-8") as f_intr:
                 condit_intr = json.load(f_intr)
@@ -72,9 +81,6 @@ def run_normal_data_pipeline(args):
         else:
             print(f"[Warning] Intrinsic JSON not found or invalid: {args.condit_intr_path}. "
                   "Reconstruction will proceed without intrinsic conditioning.")
-    else:
-        condit_depth_path = None
-        intrinsics_np = None
 
     # ================= 3. Initialization  =================
     print(f"Initializing SimpleVideoDataGenerator  model={args.model_type}  "
@@ -112,7 +118,8 @@ if __name__ == "__main__":
     default_save_dir = str(Path(r"G:\vln_real_data\l3rocc_data\20260601\rosbag_20260529_155555"))
 
     # 其他参数（默认值）
-    default_use_depth = True     # 是否使用深度数据作为模型输入（条件），False 则仅使用 RGB 输入
+    default_use_depth = True       # 是否使用深度数据作为模型输入（条件），False 则不使用 depth conditioning
+    default_use_intrinsic = True   # 是否使用真实标定内参（既作为 Pi3X 条件，也用于覆盖最终保存的 K）
     default_model_type = "pi3x"    # 'pi3x' (multimodal, supports depth) or 'pi3' (RGB-only)
     default_pcd_save = True        # 是否保存结果文件
     default_mesh = True           # 是否使用 Poisson 表面重建网格（否则输出原始点云）
@@ -161,11 +168,19 @@ if __name__ == "__main__":
         help="'run': generate LeRobot dataset; 'visual': generate visualisation files.",
     )
 
-    # ---------- Depth / model selection ----------
+    # ---------- Depth / Intrinsic / model selection ----------
     parser.add_argument(
         "--use_depth", type=_parse_bool, default=default_use_depth,
         metavar="true|false",
-        help="Whether to feed depth data into the model. Default: false.",
+        help="Whether to feed depth data into Pi3X as conditioning.",
+    )
+    parser.add_argument(
+        "--use_intrinsic", type=_parse_bool, default=default_use_intrinsic,
+        metavar="true|false",
+        help="Whether to load the calibrated K from info.json. When true: "
+             "(1) K is fed to Pi3X as conditioning (if model_type='pi3x'); "
+             "(2) the rescaled K replaces the DLT-estimated K in the saved Parquet. "
+             "Decoupled from --use_depth so RGB+intrinsic-only is possible.",
     )
     parser.add_argument(
         "--model_type", type=str, default=default_model_type, choices=["pi3", "pi3x"],

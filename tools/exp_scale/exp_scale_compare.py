@@ -172,7 +172,9 @@ def run_pi3x(gen, imgs, conditions=None):
         if conditions is None:
             res = gen.model(imgs[None])
         else:
-            res = gen.model(imgs[None], **conditions)
+            # K_rescaled 是 utils 透传的元数据,不是 Pi3X kwarg,splat 前剔除。
+            cond_kwargs = {k: v for k, v in conditions.items() if k != "K_rescaled"}
+            res = gen.model(imgs[None], **cond_kwargs)
 
     out = {
         "cam_pos": res["camera_poses"][0][:, :3, 3].float().cpu().numpy(),   # (N, 3) 公制(米)

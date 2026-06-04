@@ -13,7 +13,7 @@
 
 **/__pycache__/
 
-.vscode
+/.vscode
 ckpts
 
 /checkpoints
@@ -38,4 +38,6 @@ example.py
 pyproject.toml
 
 /tools/exp_scale/exp_out
-.claude
+/tools/exp_intrinsic/exp_out
+/.claude
+/tools/run_bash
