@@ -20,6 +20,11 @@ from L3ROcc.dataset.intern_nav_adapter import InternNavSequenceLoader
 from L3ROcc.generater.intern_vln_env import InternNavDataGenerator
 
 
+def _parse_bool(v):
+    """Accept 'true'/'false' (case-insensitive) as argparse bool values."""
+    return str(v).strip().lower() == "true"
+
+
 def run_dataset_pipeline(args):
     """
     Main pipeline function to load trajectory data and generate OCC (Occupancy) data.
@@ -43,6 +48,17 @@ def run_dataset_pipeline(args):
     # Whether to use mesh instead of origin point cloud
     mesh = args.mesh
 
+    use_depth = args.use_depth
+    use_multimodal = args.model_type == "pi3x"
+
+    # -------- Consistency check --------
+    if use_depth and not use_multimodal:
+        print("[Warning] use_depth=True but model_type='pi3'. "
+              "Pi3 does NOT support depth conditioning — depth input will be ignored by the model.")
+    if not use_depth and use_multimodal:
+        print("[Info] model_type='pi3x' but use_depth=False. "
+              "Pi3X will run in RGB-only mode (no depth / intrinsic conditions).")
+
     # Directory containing model checkpoints
     model_dir = os.path.join(project_root, "ckpt")
 
@@ -59,14 +75,17 @@ def run_dataset_pipeline(args):
     # Initialize the generator. Note: save_dir is a temporary root here;
     # it will be updated for each specific trajectory in the loop.
     generator = InternNavDataGenerator(
-        config_path=config_path, save_dir=output_root, model_dir=model_dir
+        config_path=config_path,
+        save_dir=output_root,
+        model_dir=model_dir,
+        use_multimodal=use_multimodal,
     )
 
     # ================= 3. Start Processing Loop =================
     for i in range(len(loader)):
         try:
             # A. Retrieve information from the loader
-            video_path, cam_intrinsics, cam_extrinsics = loader.get_trajectory_info(i)
+            video_path, depth_path, cam_intrinsics, cam_extrinsics = loader.get_trajectory_info(i)
 
             if video_path is None:
                 print(f"Skipping trajectory {i}: Video file not found.")
@@ -75,6 +94,21 @@ def run_dataset_pipeline(args):
             # The DataGenerator requires 'input_path' to point directly to the video file
             # e.g., .../observation.video.trajectory/0.mp4
             input_path_for_gen = video_path
+
+            condit_depth_path = None
+            intrinsics_np = None
+            if use_depth:
+                if depth_path is not None and os.path.isfile(depth_path):
+                    condit_depth_path = depth_path
+                else:
+                    print(f"[Warning] No depth video found for trajectory {i}. "
+                          "Reconstruction will proceed without depth conditioning.")
+
+                if cam_intrinsics is not None and isinstance(cam_intrinsics, np.ndarray) and cam_intrinsics.shape == (3, 3):
+                    intrinsics_np = cam_intrinsics.astype(np.float32)
+                else:
+                    print(f"[Warning] No valid 3x3 intrinsic matrix found for trajectory {i}. "
+                          "Reconstruction will proceed without intrinsic conditioning.")
 
             # B. Construct the specific output path for this trajectory
             # Logic: output_root / group_name / scene_id / trajectory_id
@@ -107,10 +141,10 @@ def run_dataset_pipeline(args):
             generator.save_path = current_save_dir
 
             # 2. Inject real camera intrinsics (if available)
-            if cam_intrinsics is not None:
+            if cam_intrinsics is not None and isinstance(cam_intrinsics, np.ndarray) and cam_intrinsics.shape == (3, 3):
                 generator.camera_intric = cam_intrinsics.astype(np.float32)
             else:
-                print("No intrinsics found in Parquet; using default values.")
+                print("No intrinsics found in Parquet/info.json; using default values.")
 
             # 3. Clear history buffer (prevent state leakage from the previous trajectory)
             if hasattr(generator, "occ_history_buffer"):
@@ -120,6 +154,8 @@ def run_dataset_pipeline(args):
             # 'pcd_save=True' enables the saving logic
             generator.run_pipeline(
                 input_path_for_gen,
+                condit_depth_path=condit_depth_path,
+                intrinsics_np=intrinsics_np,
                 pcd_save=pcd_save,
                 overwrite=overwrite,
                 mesh=mesh,
@@ -154,23 +190,41 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--pcd_save",
-        type=bool,
+        type=_parse_bool,
         default=True,
+        metavar="true|false",
         help="Save files",
     )
 
     parser.add_argument(
         "--overwrite",
-        type=bool,
+        type=_parse_bool,
         default=False,
+        metavar="true|false",
         help="Overwrite existing files",
     )
 
     parser.add_argument(
         "--mesh",
-        type=bool,
+        type=_parse_bool,
         default=False,
+        metavar="true|false",
         help="Use mesh instead of origin point cloud",
+    )
+
+    parser.add_argument(
+        "--use_depth",
+        type=_parse_bool,
+        default=False,
+        metavar="true|false",
+        help="Whether to feed depth data into the model. Default: true.",
+    )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="pi3x",
+        choices=["pi3", "pi3x"],
+        help="Checkpoint to load: 'pi3x' (multimodal, supports depth) or 'pi3' (RGB-only).",
     )
 
     args = parser.parse_args()

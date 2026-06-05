@@ -22,6 +22,7 @@ class InternNavDataGenerator(DataGenerator):
         config_path,
         save_dir,
         model_dir,
+        use_multimodal=True,
     ):
         """
         Initialize the InternNavDataGenerator.
@@ -31,7 +32,12 @@ class InternNavDataGenerator(DataGenerator):
             save_dir (str): Root directory where outputs will be saved.
             model_dir (str): Directory containing model checkpoints.
         """
-        super().__init__(config_path, save_dir, model_dir)
+        super().__init__(
+            config_path,
+            save_dir,
+            model_dir,
+            use_multimodal=use_multimodal,
+        )
 
     def check_processing_status(self, input_path, overwrite=False):
         """
@@ -205,9 +211,9 @@ class InternNavDataGenerator(DataGenerator):
                 if mat.shape == (4, 4):
                     pass
                 elif mat.ndim == 1 and (mat.shape[0] == 4 or mat.shape[0] == 3):
-                    try:
-                        mat = np.vstack(mat)
-                    except:
+                    # Some parquet backends may yield object arrays of row vectors.
+                    # If the data is already flat 12/16 values, defer to the reshape path below.
+                    if mat.size not in (12, 16):
                         continue
 
                 if mat.size == 16:
@@ -334,14 +340,16 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Scale Error] Exception during alignment: {e}")
             return pcd, 1.0
 
-    def update_metadata(self, paths, all_poses, all_intrinsics, input_path):
+    def update_metadata(
+        self, paths, all_camera_poses, all_camera_intrinsics, input_path
+    ):
         """
         Updates Parquet and JSON metadata files with generated camera parameters.
 
         Args:
             paths (dict): Dictionary of file paths (output of `get_io_paths`).
-            all_poses (list or np.ndarray): Generated camera extrinsic matrices (N, 4, 4).
-            all_intrinsics (list or np.ndarray): Camera intrinsic matrices (N, 3, 3).
+            all_camera_poses (list or np.ndarray): Generated camera extrinsic matrices (N, 4, 4).
+            all_camera_intrinsics (list or np.ndarray): Camera intrinsic matrices (N, 3, 3).
             input_path (str): Path to the input source, used to locate the root JSON info.
 
         Returns:
@@ -355,7 +363,7 @@ class InternNavDataGenerator(DataGenerator):
             try:
                 df = pd.read_parquet(parquet_path, engine="pyarrow")
                 curr_len = len(df)
-                gen_len = len(all_poses)
+                gen_len = len(all_camera_poses)
 
                 # Validate data consistency
                 if gen_len != curr_len:
@@ -364,8 +372,8 @@ class InternNavDataGenerator(DataGenerator):
                         f"but generated poses have {gen_len} frames."
                     )
 
-                df["observation.camera_extrinsic_occ"] = all_poses
-                df["observation.camera_intrinsic_occ"] = all_intrinsics
+                df["observation.camera_extrinsic_occ"] = all_camera_poses
+                df["observation.camera_intrinsic_occ"] = all_camera_intrinsics
 
                 df.to_parquet(parquet_path, engine="pyarrow")
                 print("Parquet updated.")
@@ -511,7 +519,14 @@ class InternNavDataGenerator(DataGenerator):
                 break
 
     def run_pipeline(
-        self, input_path, pcd_save=True, overwrite=False, mesh=False, T_cam2base=None
+        self,
+        input_path,
+        condit_depth_path=None,
+        intrinsics_np=None,
+        pcd_save=True,
+        overwrite=False,
+        mesh=False,
+        T_cam2base=None,
     ):
         """
         Executes the full data generation pipeline:
@@ -519,6 +534,8 @@ class InternNavDataGenerator(DataGenerator):
 
         Args:
             input_path (str): Path to the input video file.
+            condit_depth_path (str, optional): Path to the conditional depth video (Pi3X only).
+            intrinsics_np (np.ndarray, optional): 3x3 intrinsic matrix used for Pi3X conditioning.
             pcd_save (bool, optional): Whether to save 3D artifacts (point cloud, etc.). Defaults to True.
             overwrite (bool, optional): Whether to overwrite existing files. Defaults to False.
             mesh (bool, optional): Whether to use mesh instead of origin point cloud. Defaults to False.
@@ -532,7 +549,9 @@ class InternNavDataGenerator(DataGenerator):
             return
 
         # 3D Reconstruction
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
+            input_path, condit_depth_path, intrinsics_np
+        )
 
         # Align with Ground Truth Scale
         # self.camera_pose and pcd are updated to the aligned scale here
