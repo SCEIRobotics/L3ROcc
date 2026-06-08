@@ -13,9 +13,19 @@ class InternNavSequenceLoader:
     sequences and manages paths for RGB images, metadata (Parquet), and video files.
     """
 
-    # Candidate sub-directories (relative to a trajectory root) under which a
-    # depth video may live. Probed in order; first hit wins. Both layouts have
-    # been observed in datasets that mirror the InternData-N1 chunk structure.
+    # Candidate sub-directories (relative to a unit root) under which the RGB
+    # trajectory video may live. Probed in order; first hit wins.
+    # - observation.video.trajectory: InternData-N1 layout (one mp4 per trajectory)
+    # - observation.images.RGB / .rgb: lerobot rosbag layout (many episode_*.mp4 per rosbag)
+    _RGB_CANDIDATE_DIRS = (
+        "videos/chunk-000/observation.video.trajectory",
+        "videos/chunk-000/observation.images.RGB",
+        "videos/chunk-000/observation.images.rgb",
+    )
+    _RGB_CANDIDATE_EXTS = (".mp4",)
+
+    # Candidate sub-directories (relative to a unit root) under which a depth
+    # video may live. Probed in order; first hit wins.
     _DEPTH_CANDIDATE_DIRS = (
         "videos/chunk-000/observation.video.depth",
         "videos/chunk-000/observation.images.depth",
@@ -25,94 +35,154 @@ class InternNavSequenceLoader:
     def __init__(self, root_dirs):
         self.root_dirs = root_dirs
 
-        # Lists to store file paths for valid trajectories
-        self.trajectory_dirs = []  # Root directory of the trajectory
-        self.trajectory_rgb_paths = []  # Path to the RGB image folder
-        self.trajectory_data_paths = []  # Path to the metadata .parquet file
-        self.trajectory_video_paths = []  # Path to the RGB trajectory video file
-        self.trajectory_depth_paths = []  # Path to the depth video file (.mkv/.mp4), if available
+        # Per-episode entries. One element per (unit, episode) pair.
+        # `trajectory_dirs[i]` holds the unit root (rosbag_* or trajectory_*) the
+        # episode lives in; multiple episodes from the same rosbag share that root.
+        self.trajectory_dirs = []
+        self.trajectory_data_paths = []   # episode_*.parquet
+        self.trajectory_video_paths = []  # episode_*.mp4 (RGB)
+        self.trajectory_depth_paths = []  # episode_*.{mkv,mp4} or None
 
         self._scan_dataset()
 
-    def _scan_dataset(self):
-        """
-        Traverses the dataset root directory to index all valid trajectory sequences.
-        A trajectory is considered valid only if RGB, data, and video components exist.
-        """
-        print(f"Scanning dataset in {self.root_dirs}...")
+    @staticmethod
+    def _is_unit_dir(path):
+        """A unit holds the canonical chunk layout: ``data/chunk-000`` and
+        ``videos/chunk-000`` siblings. Covers both a lerobot ``rosbag_*`` and an
+        InternData-N1 ``trajectory_*``."""
+        return os.path.isdir(os.path.join(path, "data", "chunk-000")) and os.path.isdir(
+            os.path.join(path, "videos", "chunk-000")
+        )
 
-        # 1. Iterate over scene groups (e.g., gibson_zed, 3dfront_d435i)
-        group_dirs = [
-            d
-            for d in os.listdir(self.root_dirs)
-            if os.path.isdir(os.path.join(self.root_dirs, d))
+    def _iter_unit_dirs(self, root):
+        """Yield every unit directory under ``root``, auto-detecting layout:
+
+        1. ``root`` itself is a unit -> single rosbag / single trajectory passed directly.
+        2. ``root``'s immediate children are units -> rosbag parent (lerobot batch).
+        3. Otherwise fall back to InternData-N1 nesting: ``<group>/<scene>/<trajectory_*>``.
+        """
+        if self._is_unit_dir(root):
+            yield root
+            return
+
+        try:
+            first_level = sorted(
+                d for d in os.listdir(root)
+                if os.path.isdir(os.path.join(root, d))
+            )
+        except OSError:
+            return
+
+        first_level_units = [
+            os.path.join(root, d) for d in first_level
+            if self._is_unit_dir(os.path.join(root, d))
         ]
+        if first_level_units:
+            for unit in first_level_units:
+                yield unit
+            return
 
-        for group_dir in group_dirs:
-            group_path = os.path.join(self.root_dirs, group_dir)
-            scene_dirs = os.listdir(group_path)
-
-            # 2. Iterate over individual scenes (e.g., 00154c06...)
-            for scene_dir in scene_dirs:
+        # InternData-N1: <group>/<scene>/<trajectory_*>
+        for group_dir in first_level:
+            group_path = os.path.join(root, group_dir)
+            try:
+                scenes = os.listdir(group_path)
+            except OSError:
+                continue
+            for scene_dir in sorted(scenes):
                 scene_path = os.path.join(group_path, scene_dir)
                 if not os.path.isdir(scene_path):
                     continue
+                try:
+                    trajs = os.listdir(scene_path)
+                except OSError:
+                    continue
+                for traj_dir in sorted(trajs):
+                    traj_path = os.path.join(scene_path, traj_dir)
+                    if self._is_unit_dir(traj_path):
+                        yield traj_path
 
-                traj_dirs = os.listdir(scene_path)
+    def _find_rgb_videos(self, unit_dir):
+        """Return ``[(video_path, episode_id), ...]`` for a unit. Empty list if none.
+        ``episode_id`` is the mp4 stem, used to pair parquet/depth by episode."""
+        for rel_dir in self._RGB_CANDIDATE_DIRS:
+            cand = os.path.join(unit_dir, rel_dir)
+            if not os.path.exists(cand):
+                continue
+            if os.path.isfile(cand) and cand.lower().endswith(self._RGB_CANDIDATE_EXTS):
+                stem = os.path.splitext(os.path.basename(cand))[0]
+                return [(cand, stem)]
+            if os.path.isdir(cand):
+                hits = []
+                for f in sorted(os.listdir(cand)):
+                    if f.lower().endswith(self._RGB_CANDIDATE_EXTS):
+                        stem = os.path.splitext(f)[0]
+                        hits.append((os.path.join(cand, f), stem))
+                if hits:
+                    return hits
+        return []
 
-                # 3. Iterate over trajectory folders (e.g., trajectory_1)
-                for traj_dir in traj_dirs:
-                    entire_task_dir = os.path.join(scene_path, traj_dir)
+    def _find_depth_video(self, unit_dir, episode_id=None):
+        """Probe conventional depth-video locations under a unit.
 
-                    # Construct paths for critical components
-                    data_path = os.path.join(
-                        entire_task_dir, "data/chunk-000/episode_000000.parquet"
-                    )
-
-                    # Define the potential video location
-                    video_folder_path = os.path.join(
-                        entire_task_dir, "videos/chunk-000/observation.video.trajectory"
-                    )
-
-                    # Locate the specific RGB .mp4 video file
-                    video_file_path = None
-                    if os.path.exists(video_folder_path):
-                        # Case A: The path is directly a file
-                        if os.path.isfile(
-                            video_folder_path
-                        ) and video_folder_path.endswith(".mp4"):
-                            video_file_path = video_folder_path
-                        # Case B: The path is a directory containing the mp4
-                        elif os.path.isdir(video_folder_path):
-                            files = os.listdir(video_folder_path)
-                            for f in files:
-                                if f.endswith(".mp4"):
-                                    video_file_path = os.path.join(video_folder_path, f)
-                                    break
-
-                    # Validate that all required components exist before registering
-                    if os.path.exists(data_path) and video_file_path:
-                        depth_file_path = self._find_depth_video(entire_task_dir)
-                        self.trajectory_dirs.append(entire_task_dir)
-                        self.trajectory_data_paths.append(data_path)
-                        self.trajectory_video_paths.append(video_file_path)
-                        self.trajectory_depth_paths.append(depth_file_path)
-
-        print(f"Found {len(self.trajectory_dirs)} valid trajectories.")
-
-    def _find_depth_video(self, traj_dir):
-        """Probe conventional depth-video locations under a trajectory root.
-        Returns the first matching file path, or None if no depth exists.
-        Depth is optional, so absence is not a failure.
+        When ``episode_id`` is given, prefer a file whose stem equals it (lerobot
+        rosbag uses one depth file per episode). Otherwise return the first depth
+        file found, matching the single-trajectory InternData-N1 convention.
+        Depth is optional; absence returns None.
         """
         for rel_dir in self._DEPTH_CANDIDATE_DIRS:
-            cand_dir = os.path.join(traj_dir, rel_dir)
+            cand_dir = os.path.join(unit_dir, rel_dir)
             if not os.path.isdir(cand_dir):
                 continue
-            for f in sorted(os.listdir(cand_dir)):
-                if f.lower().endswith(self._DEPTH_CANDIDATE_EXTS):
-                    return os.path.join(cand_dir, f)
+            files = sorted(
+                f for f in os.listdir(cand_dir)
+                if f.lower().endswith(self._DEPTH_CANDIDATE_EXTS)
+            )
+            if not files:
+                continue
+            if episode_id is not None:
+                for f in files:
+                    if os.path.splitext(f)[0] == episode_id:
+                        return os.path.join(cand_dir, f)
+            return os.path.join(cand_dir, files[0])
         return None
+
+    def _resolve_parquet(self, unit_dir, episode_id):
+        """Pair an episode mp4 with its parquet.
+
+        Tries ``data/chunk-000/{episode_id}.parquet`` first (matches the mp4 stem),
+        then falls back to the legacy ``episode_000000.parquet`` fixed name used by
+        early InternData-N1 trajectories.
+        """
+        chunk_dir = os.path.join(unit_dir, "data", "chunk-000")
+        primary = os.path.join(chunk_dir, f"{episode_id}.parquet")
+        if os.path.exists(primary):
+            return primary
+        legacy = os.path.join(chunk_dir, "episode_000000.parquet")
+        if os.path.exists(legacy):
+            return legacy
+        return None
+
+    def _scan_dataset(self):
+        """Index every ``(unit, episode)`` pair under ``root_dirs``.
+
+        Supports both InternData-N1 nesting and lerobot rosbag layouts; see
+        ``_iter_unit_dirs`` for the detection rules.
+        """
+        print(f"Scanning dataset in {self.root_dirs}...")
+
+        for unit_dir in self._iter_unit_dirs(self.root_dirs):
+            for video_path, episode_id in self._find_rgb_videos(unit_dir):
+                data_path = self._resolve_parquet(unit_dir, episode_id)
+                if data_path is None:
+                    continue
+                depth_path = self._find_depth_video(unit_dir, episode_id)
+                self.trajectory_dirs.append(unit_dir)
+                self.trajectory_data_paths.append(data_path)
+                self.trajectory_video_paths.append(video_path)
+                self.trajectory_depth_paths.append(depth_path)
+
+        print(f"Found {len(self.trajectory_dirs)} valid trajectories.")
 
     def __len__(self):
         return len(self.trajectory_dirs)

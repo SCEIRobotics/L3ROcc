@@ -107,14 +107,23 @@ def run_dataset_pipeline(args):
 
             input_path_for_gen = video_path
 
-            # B. Construct the specific output path for this trajectory
-            # Logic: output_root / group_name / scene_id / trajectory_id
+            # B. Construct the specific output path for this trajectory.
+            # InternData-N1: output_root / <group> / <scene> / <trajectory_*>
+            # lerobot rosbag: output_root / <rosbag_*> / <episode_id>
             path_parts = video_path.split(os.sep)
             try:
                 start_idx = path_parts.index("traj_data") + 1
                 relative_path = os.path.join(*path_parts[start_idx : start_idx + 3])
             except ValueError:
-                relative_path = f"trajectory_{i:06d}"
+                rosbag_idx = next(
+                    (j for j, p in enumerate(path_parts) if p.startswith("rosbag_")),
+                    None,
+                )
+                if rosbag_idx is not None:
+                    episode_id = os.path.splitext(path_parts[-1])[0]
+                    relative_path = os.path.join(path_parts[rosbag_idx], episode_id)
+                else:
+                    relative_path = f"trajectory_{i:06d}"
 
             current_save_dir = os.path.join(output_root, relative_path)
             if not os.path.exists(current_save_dir):
