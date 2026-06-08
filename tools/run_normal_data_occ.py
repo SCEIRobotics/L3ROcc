@@ -118,13 +118,13 @@ if __name__ == "__main__":
     default_save_dir = str(Path(r"G:\vln_real_data\l3rocc_data\20260601\rosbag_20260529_155555"))
 
     # 其他参数（默认值）
-    default_use_depth = True       # 是否使用深度数据作为模型输入（条件），False 则不使用 depth conditioning
-    default_use_intrinsic = True   # 是否使用真实标定内参（既作为 Pi3X 条件，也用于覆盖最终保存的 K）
     default_model_type = "pi3x"    # 'pi3x' (multimodal, supports depth) or 'pi3' (RGB-only)
+    default_use_depth = False       # 是否使用深度数据作为模型输入（条件），False 则不使用 depth conditioning
+    default_use_intrinsic = True   # 是否使用真实标定内参（既作为 Pi3X 条件，也用于覆盖最终保存的 K）
     default_pcd_save = True        # 是否保存结果文件
-    default_mesh = True           # 是否使用 Poisson 表面重建网格（否则输出原始点云）
+    default_mesh = False           # 是否使用 Poisson 表面重建网格（否则输出原始点云）
 
-    quick_verification = True     # 是否启用快速验证模式（仅处理前 N 帧以快速验证数据路径）
+    quick_verification = False     # 是否启用快速验证模式（仅处理前 N 帧以快速验证数据路径）
 
     parser = argparse.ArgumentParser(
         description="Run normal data pipeline for video occupancy generation."

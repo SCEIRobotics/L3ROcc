@@ -1,3 +1,4 @@
+import json
 import os
 
 import numpy as np
@@ -28,8 +29,8 @@ class InternNavSequenceLoader:
         self.trajectory_dirs = []  # Root directory of the trajectory
         self.trajectory_rgb_paths = []  # Path to the RGB image folder
         self.trajectory_data_paths = []  # Path to the metadata .parquet file
-        self.trajectory_video_paths = []  # Path to the .mp4 video file
-        self.trajectory_depth_paths = []  # Optional depth video; None if absent
+        self.trajectory_video_paths = []  # Path to the RGB trajectory video file
+        self.trajectory_depth_paths = []  # Path to the depth video file (.mkv/.mp4), if available
 
         self._scan_dataset()
 
@@ -73,7 +74,7 @@ class InternNavSequenceLoader:
                         entire_task_dir, "videos/chunk-000/observation.video.trajectory"
                     )
 
-                    # Locate the specific .mp4 video file
+                    # Locate the specific RGB .mp4 video file
                     video_file_path = None
                     if os.path.exists(video_folder_path):
                         # Case A: The path is directly a file
@@ -124,40 +125,65 @@ class InternNavSequenceLoader:
             index (int): The index of the trajectory sequence.
 
         Returns:
-            tuple: (video_path, camera_intrinsic, camera_extrinsic, depth_path)
-                - video_path (str): Absolute path to the RGB video file.
-                - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix
-                  at the ORIGINAL video resolution (parsed from parquet).
-                - camera_extrinsic (np.ndarray or None): 4x4 camera-to-base extrinsic.
-                - depth_path (str or None): Absolute path to an associated depth video
-                  if discovered under a conventional sub-directory, else None.
+            tuple: (video_path, depth_path, camera_intrinsic, camera_extrinsic)
+                - video_path (str): Absolute path to the RGB trajectory video file.
+                - depth_path (str or None): Absolute path to the depth video file if available.
+                - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix.
+                - camera_extrinsic (np.ndarray or None): 4x4 camera to base extrinsic matrix.
         """
+
+        def _reshape_matrix(value, shape):
+            arr = np.array(value, dtype=np.float32)
+            if arr.shape == shape:
+                return arr
+            if arr.size == shape[0] * shape[1]:
+                return arr.reshape(shape)
+            return None
 
         # 1. Retrieve stored paths
         video_path = self.trajectory_video_paths[index]
-        data_path = self.trajectory_data_paths[index]
         depth_path = self.trajectory_depth_paths[index]
+        data_path = self.trajectory_data_paths[index]
+        traj_root = self.trajectory_dirs[index]
 
-        # 2. Parse Parquet data to extract camera intrinsics
+        # 2. Parse Parquet data to extract camera intrinsics / extrinsics
         camera_intrinsic = None
         camera_extrinsic = None
         try:
             df = pd.read_parquet(data_path)
-            # Flattened format [fx, 0, cx, 0, fy, cy, 0, 0, 1] -> Reshape to (3, 3)
-            camera_intrinsic = np.vstack(
-                np.array(df["observation.camera_intrinsic"].tolist()[0])
-            ).reshape(3, 3)
-            print(
-                f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
-            )
-            camera_extrinsic = np.vstack(
-                np.array(df["observation.camera_extrinsic"].tolist()[0])
-            ).reshape(4, 4)
-            # print(f"Loaded camera extrinsic for trajectory {index}: \n{camera_extrinsic}")
+
+            if "observation.camera_intrinsic" in df.columns and len(df) > 0:
+                camera_intrinsic = _reshape_matrix(
+                    df["observation.camera_intrinsic"].tolist()[0], (3, 3)
+                )
+
+            if "observation.camera_extrinsic" in df.columns and len(df) > 0:
+                camera_extrinsic = _reshape_matrix(
+                    df["observation.camera_extrinsic"].tolist()[0], (4, 4)
+                )
+
+            if camera_intrinsic is not None:
+                print(
+                    f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
+                )
         except Exception as e:
             print(f"Error reading parquet {data_path}: {e}")
-            # Caller must handle None return type
-            camera_intrinsic = None
-            camera_extrinsic = None
 
-        return video_path, camera_intrinsic, camera_extrinsic, depth_path
+        # 3. Fallback: try meta/info.json for Pi3X conditioning intrinsics
+        if camera_intrinsic is None:
+            info_json_path = os.path.join(traj_root, "meta", "info.json")
+            if os.path.exists(info_json_path):
+                try:
+                    with open(info_json_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    if "head_camera_intrinsic" in meta:
+                        camera_intrinsic = _reshape_matrix(
+                            meta["head_camera_intrinsic"], (3, 3)
+                        )
+                        print(
+                            f"Loaded head_camera_intrinsic from info.json for trajectory {index}."
+                        )
+                except Exception as e:
+                    print(f"Error reading intrinsic json {info_json_path}: {e}")
+
+        return video_path, depth_path, camera_intrinsic, camera_extrinsic

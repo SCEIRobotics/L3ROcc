@@ -96,8 +96,8 @@ def run_dataset_pipeline(args):
     # ================= 3. Start Processing Loop =================
     for i in range(len(loader)):
         try:
-            # A. Retrieve info from the loader (now also returns depth_path)
-            video_path, cam_intrinsics, cam_extrinsics, depth_path = (
+            # A. Retrieve info from the loader (returns depth_path between video and intrinsic)
+            video_path, depth_path, cam_intrinsics, cam_extrinsics = (
                 loader.get_trajectory_info(i)
             )
 

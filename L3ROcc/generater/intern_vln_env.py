@@ -210,9 +210,9 @@ class InternNavDataGenerator(DataGenerator):
                 if mat.shape == (4, 4):
                     pass
                 elif mat.ndim == 1 and (mat.shape[0] == 4 or mat.shape[0] == 3):
-                    try:
-                        mat = np.vstack(mat)
-                    except:
+                    # Some parquet backends may yield object arrays of row vectors.
+                    # If the data is already flat 12/16 values, defer to the reshape path below.
+                    if mat.size not in (12, 16):
                         continue
 
                 if mat.size == 16:
@@ -339,14 +339,16 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Scale Error] Exception during alignment: {e}")
             return pcd, 1.0
 
-    def update_metadata(self, paths, all_poses, all_intrinsics, input_path):
+    def update_metadata(
+        self, paths, all_camera_poses, all_camera_intrinsics, input_path
+    ):
         """
         Updates Parquet and JSON metadata files with generated camera parameters.
 
         Args:
             paths (dict): Dictionary of file paths (output of `get_io_paths`).
-            all_poses (list or np.ndarray): Generated camera extrinsic matrices (N, 4, 4).
-            all_intrinsics (list or np.ndarray): Camera intrinsic matrices (N, 3, 3).
+            all_camera_poses (list or np.ndarray): Generated camera extrinsic matrices (N, 4, 4).
+            all_camera_intrinsics (list or np.ndarray): Camera intrinsic matrices (N, 3, 3).
             input_path (str): Path to the input source, used to locate the root JSON info.
 
         Returns:
@@ -360,7 +362,7 @@ class InternNavDataGenerator(DataGenerator):
             try:
                 df = pd.read_parquet(parquet_path, engine="pyarrow")
                 curr_len = len(df)
-                gen_len = len(all_poses)
+                gen_len = len(all_camera_poses)
 
                 # Validate data consistency
                 if gen_len != curr_len:
@@ -369,8 +371,8 @@ class InternNavDataGenerator(DataGenerator):
                         f"but generated poses have {gen_len} frames."
                     )
 
-                df["observation.camera_extrinsic_occ"] = all_poses
-                df["observation.camera_intrinsic_occ"] = all_intrinsics
+                df["observation.camera_extrinsic_occ"] = all_camera_poses
+                df["observation.camera_intrinsic_occ"] = all_camera_intrinsics
 
                 df.to_parquet(parquet_path, engine="pyarrow")
                 print("Parquet updated.")
