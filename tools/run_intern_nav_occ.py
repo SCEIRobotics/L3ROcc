@@ -1,10 +1,10 @@
+import argparse
 import faulthandler
-import traceback
 import os
+import traceback
 import json
 
 import numpy as np
-import argparse
 
 # Set environment variables to limit thread usage for numerical libraries
 # This is often necessary to prevent CPU oversubscription in multi-process environments
@@ -107,9 +107,33 @@ def run_dataset_pipeline(args):
 
             input_path_for_gen = video_path
 
-            # B. Construct the specific output path for this trajectory.
-            # InternData-N1: output_root / <group> / <scene> / <trajectory_*>
-            # lerobot rosbag: output_root / <rosbag_*> / <episode_id>
+            condit_depth_path = None
+            intrinsics_np = None
+            if use_depth:
+                if depth_path is not None and os.path.isfile(depth_path):
+                    condit_depth_path = depth_path
+                else:
+                    print(
+                        f"[Warning] No depth video found for trajectory {i}. "
+                        "Reconstruction will proceed without depth conditioning."
+                    )
+
+                if (
+                    cam_intrinsics is not None
+                    and isinstance(cam_intrinsics, np.ndarray)
+                    and cam_intrinsics.shape == (3, 3)
+                ):
+                    intrinsics_np = cam_intrinsics.astype(np.float32)
+                else:
+                    print(
+                        f"[Warning] No valid 3x3 intrinsic matrix found for trajectory {i}. "
+                        "Reconstruction will proceed without intrinsic conditioning."
+                    )
+
+            # B. Construct the specific output path for this trajectory
+            # Logic: output_root / group_name / scene_id / trajectory_id
+            # We infer the directory structure from 'video_path'
+            # Example video_path: .../traj_data/3dfront/scene_abc/traj_1/videos/...
             path_parts = video_path.split(os.sep)
             try:
                 start_idx = path_parts.index("traj_data") + 1
@@ -129,8 +153,8 @@ def run_dataset_pipeline(args):
             if not os.path.exists(current_save_dir):
                 os.makedirs(current_save_dir)
 
-            print(f"\n[{i+1}/{len(loader)}] Processing: {relative_path}")
-            print(f"   Input:  {input_path_for_gen}")
+            print(f"\n[{i + 1}/{len(loader)}] Processing: {relative_path}")
+            print(f"   Input: {input_path_for_gen}")
             print(f"   Output: {current_save_dir}")
 
             # C. Resolve depth and intrinsic for this trajectory
@@ -156,6 +180,18 @@ def run_dataset_pipeline(args):
 
             # D. Inject per-trajectory state into the generator
             generator.save_path = current_save_dir
+
+            # 2. Inject real camera intrinsics (if available)
+            if (
+                cam_intrinsics is not None
+                and isinstance(cam_intrinsics, np.ndarray)
+                and cam_intrinsics.shape == (3, 3)
+            ):
+                generator.camera_intric = cam_intrinsics.astype(np.float32)
+            else:
+                print("No intrinsics found in Parquet/info.json; using default values.")
+
+            # 3. Clear history buffer (prevent state leakage from the previous trajectory)
             if hasattr(generator, "occ_history_buffer"):
                 generator.occ_history_buffer.clear()
 
@@ -185,12 +221,16 @@ if __name__ == "__main__":
 
     # ---------- Dataset paths ----------
     parser.add_argument(
-        "--dataset_root", type=str, default="./data/traj_data/",
-        help="Root directory to load InternData-N1 trajectories.",
+        "--dataset_root",
+        type=str,
+        default="./data/examples/small_vln_n1/traj_data",
+        help="Directory to load dataset",
     )
     parser.add_argument(
-        "--output_root", type=str, default="./data/traj_data/",
-        help="Root directory to save generated outputs.",
+        "--output_root",
+        type=str,
+        default="./data/examples/small_vln_n1/traj_data",
+        help="Directory to save outputs",
     )
 
     # ---------- Mode / Model selection ----------
@@ -205,7 +245,9 @@ if __name__ == "__main__":
              "default false. When true, the loader probes each trajectory for a depth video.",
     )
     parser.add_argument(
-        "--use_intrinsic", type=_parse_bool, default=True,
+        "--overwrite",
+        type=_parse_bool,
+        default=True,
         metavar="true|false",
         help="Use a calibrated K. When true: (1) parquet's "
              "observation.camera_intrinsic is loaded automatically, "

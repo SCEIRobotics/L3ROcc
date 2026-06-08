@@ -40,4 +40,5 @@ pyproject.toml
 /tools/exp_scale/exp_out
 /tools/exp_intrinsic/exp_out
 /.claude
+.zed/
 /tools/run_bash

@@ -204,26 +204,8 @@ class InternNavDataGenerator(DataGenerator):
             for p in gt_raw:
                 if p is None:
                     continue
-                mat = np.array(p)
 
-                # Handle varying matrix shapes/flattened arrays
-                if mat.shape == (4, 4):
-                    pass
-                elif mat.ndim == 1 and (mat.shape[0] == 4 or mat.shape[0] == 3):
-                    # Some parquet backends may yield object arrays of row vectors.
-                    # If the data is already flat 12/16 values, defer to the reshape path below.
-                    if mat.size not in (12, 16):
-                        continue
-
-                if mat.size == 16:
-                    mat = mat.reshape(4, 4)
-                elif mat.size == 12:
-                    mat = mat.reshape(3, 4)
-                    mat = np.vstack([mat, [0, 0, 0, 1]])
-
-                if mat.shape != (4, 4):
-                    continue
-
+                mat = np.stack(p)
                 gt_poses_np.append(mat)
 
             if len(gt_poses_np) == 0:
@@ -248,25 +230,17 @@ class InternNavDataGenerator(DataGenerator):
             scale: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
         """
 
-        def to_mat4x4(p):
-            p = np.array(p)
-            if p.ndim == 1:
-                if p.size == 16:
-                    return p.reshape(4, 4)
-                if p.size == 12:
-                    return np.vstack([p.reshape(3, 4), [0, 0, 0, 1]])
-            return p
+        # def to_mat4x4(p):
+        #     p = np.array(p)
+        #     if p.ndim == 1:
+        #         if p.size == 16:
+        #             return p.reshape(4, 4)
+        #         if p.size == 12:
+        #             return np.vstack([p.reshape(3, 4), [0, 0, 0, 1]])
+        #     return p
 
-        try:
-            traj_gt = np.array([to_mat4x4(p)[:3, 3] for p in poses_gt])
-            traj_pred = np.array([to_mat4x4(p)[:3, 3] for p in poses_pred])
-        except Exception as e:
-            print(f"[Scale Error] Data shape mismatch during extraction: {e}")
-            if len(poses_gt) > 0:
-                print(f"  GT pose[0] shape: {np.array(poses_gt[0]).shape}")
-            if len(poses_pred) > 0:
-                print(f"  Pred pose[0] shape: {np.array(poses_pred[0]).shape}")
-            return 1.0
+        traj_gt = np.array([p[:3, 3] for p in poses_gt])
+        traj_pred = np.array([p[:3, 3] for p in poses_pred])
 
         # Ensure frame counts match
         n_frames = min(len(traj_gt), len(traj_pred))

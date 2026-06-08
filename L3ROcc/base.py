@@ -28,6 +28,7 @@ from L3ROcc.utils import (
     voxel2points,
     voxels_to_pcd,
 )
+
 # NOTE: Pi3 / Pi3X are imported lazily inside _load_pretrained_model (see there).
 # Importing the model modules (dinov2 / flash-attention CUDA init) at top level breaks
 # safetensors' mmap load on Windows; the lazy import lets us pre-load weights to CPU first.
@@ -89,7 +90,9 @@ class DataGenerator:
             .to(self.device)
             .eval()
         )
-        print(f"Loaded {'Pi3X' if model_type == 'pi3x' else 'Pi3'} from {ckpt_path}")
+        print(
+            f"Loaded {'Pi3X (multimodal)' if use_multimodal else 'Pi3 (RGB-only)'} from {ckpt_path}"
+        )
 
         self.free_label = 0
         self.pcd = None
@@ -135,8 +138,10 @@ class DataGenerator:
         """
         if model_type == "pi3x":
             from third_party.pi3.pi3.models.pi3x import Pi3X
+
             return Pi3X.from_pretrained(ckpt_path)
         from third_party.pi3.pi3.models.pi3 import Pi3
+
         return Pi3.from_pretrained(ckpt_path)
 
     def _select_amp_dtype(self):
@@ -162,10 +167,14 @@ class DataGenerator:
                 F.scaled_dot_product_attention(probe, probe, probe)
             return torch.bfloat16
         except Exception:
-            print("[Info] FlashAttention SDPA kernel unavailable; using float16 for inference.")
+            print(
+                "[Info] FlashAttention SDPA kernel unavailable; using float16 for inference."
+            )
             return torch.float16
 
-    def pcd_reconstruction(self, input_path, condit_depth_path=None, intrinsics_np=None):
+    def pcd_reconstruction(
+        self, input_path, condit_depth_path=None, intrinsics_np=None
+    ):
         """
         Reconstructs the 3D point cloud and camera trajectory from video frames using the Pi3 model.
 
@@ -214,16 +223,18 @@ class DataGenerator:
         # non_edge = ~depth_edge(
         #     res["local_points"][..., 2], rtol=0.03
         # )  # Filter depth edges to sharpen point cloud boundaries
-        
+
         # Filter noise using masks
         if self.model_type == "pi3x" and (condit_depth_path is not None):
             # 适度放宽带有真实传感器深度的检测：适当降低置信度，增加深度边缘容忍度
-            masks = (torch.sigmoid(res["conf"][..., 0]) > 0.05) 
-            non_edge = ~depth_edge(res["local_points"][..., 2], rtol=0.15) # 容忍更大范围的深度突变
+            masks = torch.sigmoid(res["conf"][..., 0]) > 0.05
+            non_edge = ~depth_edge(
+                res["local_points"][..., 2], rtol=0.15
+            )  # 容忍更大范围的深度突变
         else:
-            masks = (torch.sigmoid(res["conf"][..., 0]) > 0.1) 
+            masks = torch.sigmoid(res["conf"][..., 0]) > 0.1
             non_edge = ~depth_edge(res["local_points"][..., 2], rtol=0.03)
-        
+
         masks = torch.logical_and(masks, non_edge)[
             0
         ]  # Keep points that are both confident and non-edge
@@ -238,10 +249,10 @@ class DataGenerator:
             camera_pose,
             np.arange(camera_pose.shape[0]) * self.interval,
             np.arange(traj_len),
-        ) 
+        )
 
         # Get normalized camera rays in camera coordinates
-        ref_cam_index = 0 
+        ref_cam_index = 0
         norm_cam_ray_cam_coords = res["local_points"][0][ref_cam_index] / res[
             "local_points"
         ][0][ref_cam_index].norm(dim=2, keepdim=True)
@@ -286,7 +297,9 @@ class DataGenerator:
 
         # 1. 执行统计学离群点剔除 (Statistical Outlier Removal)
         # 能够有效铲除由真实深度图带来的漫天“飞点”，防止它们撑大场景包围盒
-        pcd_ocd, ind = pcd_ocd.remove_statistical_outlier(nb_neighbors=30, std_ratio=2.0)
+        pcd_ocd, ind = pcd_ocd.remove_statistical_outlier(
+            nb_neighbors=30, std_ratio=2.0
+        )
         pcd = np.asarray(pcd_ocd.points)
         pcd_color = np.asarray(pcd_ocd.colors)
 
@@ -297,15 +310,13 @@ class DataGenerator:
             loc_range = np.clip(q99 - q1, 1e-3, None)
         else:
             loc_range = pcd.max(0) - pcd.min(0)
-            
+
         loc_vol = np.prod(loc_range)  # Robust Total volume
         pcd_num = pcd.shape[0]
         frame_num = imgs.shape[0]
-        
+
         # Dynamic voxel size calculation, with safeguards against extreme values
-        voxel_size = (
-            loc_vol / max(pcd_num, 1) * frame_num * self.voxel_size_scale
-        )  
+        voxel_size = loc_vol / max(pcd_num, 1) * frame_num * self.voxel_size_scale
         # 限制 voxel_size 上限，防止异常大的 volume 产生过大的网格导致点云剧烈坍缩
         voxel_size = np.clip(voxel_size, 0.01, 0.2)
 
@@ -420,7 +431,9 @@ class DataGenerator:
             return scene_points
 
         except Exception as e:
-            print(f"[Error] Mesh reconstruction failed: {e}. Returning original points.")
+            print(
+                f"[Error] Mesh reconstruction failed: {e}. Returning original points."
+            )
             import pdb
 
             pdb.set_trace()
@@ -786,7 +799,7 @@ class DataGenerator:
         Returns:
             None: Saves files to disk.
         """
- 
+
         pcd_to_save = self.pcd
         if isinstance(pcd_to_save, torch.Tensor):
             pcd_to_save = pcd_to_save.detach().cpu().numpy()
@@ -796,7 +809,29 @@ class DataGenerator:
             pcd_color_to_save = pcd_color_to_save.detach().cpu().numpy()
 
         write_ply(pcd_to_save, pcd_color_to_save, paths["ply"])
-        occ_pcd_to_save = self.occ_pcd
+
+        # write traj ply
+        camera_pose_to_save = self.camera_pose
+        if isinstance(camera_pose_to_save, torch.Tensor):
+            camera_pose_to_save = camera_pose_to_save.detach().cpu().numpy()
+        camera_pose_to_save = np.asarray(camera_pose_to_save)
+        if camera_pose_to_save.ndim == 3 and camera_pose_to_save.shape[-2:] == (
+            4,
+            4,
+        ):
+            traj_points = camera_pose_to_save[:, :3, 3].astype(np.float32)
+            traj_colors = np.zeros_like(traj_points, dtype=np.float32)
+            traj_colors[:, 0] = 1.0  # Red camera trajectory points
+            trajectory_ply_path = paths.get(
+                "camera_trajectory_ply",
+                os.path.join(
+                    os.path.dirname(paths["ply"]), "camera_trajectory_orin.ply"
+                ),
+            )
+            write_ply(traj_points, traj_colors, trajectory_ply_path)
+            print(f"Saved Camera Trajectory to {trajectory_ply_path}")
+
+        occ_pcd_to_save = self.occ_pcd  # base coordinate
 
         if isinstance(occ_pcd_to_save, torch.Tensor):
             occ_pcd_to_save = occ_pcd_to_save.detach().cpu().numpy()
@@ -884,10 +919,10 @@ class DataGenerator:
         all_packed_masks = []
         all_camera_poses = []
 
-        # Prepare Intrinsics 
+        # Prepare Intrinsics
         current_intrinsic = self.camera_intric_rs.astype(np.float32)
         all_camera_intrinsics = [[row for row in current_intrinsic]] * total_frames
-    
+
         # Convert pcd to points
         if mesh:
             print(f"Using mesh")
@@ -904,9 +939,9 @@ class DataGenerator:
         self.camera_pose = self.camera_pose.astype(np.float32)
         all_camera_poses = [[row for row in pose] for pose in self.camera_pose]
         camera_poses = torch.from_numpy(self.camera_pose).to(device).float()
-        for i in range(total_frames): 
+        for i in range(total_frames):
             current_pose = camera_poses[i]
- 
+
             # Transform global OCC to current Camera Coordinates
             pcd_points_cam = self.convert_pointcloud_world_to_camera(
                 pcd_points_world, current_pose
@@ -936,7 +971,7 @@ class DataGenerator:
                 frame_indices = torch.cat([time_col, valid_voxels_occ.short()], dim=1)
 
                 all_sparse_indices_occ.append(frame_indices)
- 
+
             # Construct single frame Bool Grid (memory intensive momentarily)
             frame_grid = torch.zeros(grid_dims, dtype=torch.bool, device=device)
             if len(cam_visible_mask) > 0:
@@ -995,7 +1030,14 @@ class DataGenerator:
         pass
 
     # Single-frame OCC pipeline
-    def single_frame_pipeline(self, input_path, condit_depth_path=None, intrinsics_np=None, pcd_save=False, mesh=False):
+    def single_frame_pipeline(
+        self,
+        input_path,
+        condit_depth_path=None,
+        intrinsics_np=None,
+        pcd_save=False,
+        mesh=False,
+    ):
         """
         Generates estimated OCC map and camera trajectory from a full video episode.
 
@@ -1063,7 +1105,15 @@ class DataGenerator:
             )
 
     # Visualization pipeline with historical accumulation
-    def visual_pipeline(self, input_path, condit_depth_path=None, intrinsics_np=None, pcd_save=False, mesh=False, max_frames=None):
+    def visual_pipeline(
+        self,
+        input_path,
+        condit_depth_path=None,
+        intrinsics_np=None,
+        pcd_save=False,
+        mesh=False,
+        max_frames=None,
+    ):
         """
         Executes the full visualization pipeline with sliding window accumulation.
         Generates PLY/NPY files for merged views, solo OCC, and sequence data.
@@ -1085,9 +1135,15 @@ class DataGenerator:
         )
 
         # Quick verification: cap the trajectory so the full data path runs on only a few frames.
-        if max_frames is not None and max_frames > 0 and len(self.camera_pose) > max_frames:
-            print(f"[Quick] Truncating trajectory from {len(self.camera_pose)} to "
-                  f"{max_frames} frames for fast pipeline verification.")
+        if (
+            max_frames is not None
+            and max_frames > 0
+            and len(self.camera_pose) > max_frames
+        ):
+            print(
+                f"[Quick] Truncating trajectory from {len(self.camera_pose)} to "
+                f"{max_frames} frames for fast pipeline verification."
+            )
             self.camera_pose = self.camera_pose[:max_frames]
 
         if isinstance(pcd, torch.Tensor):
@@ -1386,7 +1442,9 @@ class DataGenerator:
             print(f"GPU OCC gen and save cost: {occ_end - occ_start}s")
 
     # Standard Pipeline for Occ Data Generation
-    def run_pipeline(self, input_path, condit_depth_path=None, intrinsics_np=None, pcd_save=True):
+    def run_pipeline(
+        self, input_path, condit_depth_path=None, intrinsics_np=None, pcd_save=True
+    ):
         """
         Executes the full data generation pipeline:
         Reconstruction -> Global Storage -> Sequence Calculation
