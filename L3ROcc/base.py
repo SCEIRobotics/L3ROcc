@@ -86,13 +86,9 @@ class DataGenerator:
         self.model_type = model_type
         ckpt_path = os.path.join(model_dir, model_type)
         self.model = (
-            self._load_pretrained_model(ckpt_path, model_type)
-            .to(self.device)
-            .eval()
+            self._load_pretrained_model(ckpt_path, model_type).to(self.device).eval()
         )
-        print(
-            f"Loaded {'Pi3X (multimodal)' if use_multimodal else 'Pi3 (RGB-only)'} from {ckpt_path}"
-        )
+        print(f"Loaded {'Pi3X' if model_type == 'pi3x' else 'Pi3'} from {ckpt_path}")
 
         self.free_label = 0
         self.pcd = None
@@ -212,7 +208,9 @@ class DataGenerator:
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=dtype):
                 if self.model_type == "pi3x":
-                    res = self.model(imgs[None], **conditions)  # Add batch dimension [1, N, 3, H, W]
+                    res = self.model(
+                        imgs[None], **conditions
+                    )  # Add batch dimension [1, N, 3, H, W]
                 else:
                     res = self.model(imgs[None])  # Add batch dimension [1, N, 3, H, W]
 
@@ -276,12 +274,16 @@ class DataGenerator:
         # known to be more accurate. Fall back to DLT estimation only when no real K is given.
         if K_rescaled is not None:
             self.camera_intric_rs = K_rescaled.astype(np.float32)
-            print(f"[intrinsics] using calibrated K (rescaled to model input):\n{self.camera_intric_rs}")
+            print(
+                f"[intrinsics] using calibrated K (rescaled to model input):\n{self.camera_intric_rs}"
+            )
         else:
-            self.camera_intric_rs = estimate_intrinsics(
-                res["local_points"][0][ref_cam_index]
-            ).cpu().numpy()
-            print(f"[intrinsics] no real K provided; using DLT-estimated K:\n{self.camera_intric_rs}")
+            self.camera_intric_rs = (
+                estimate_intrinsics(res["local_points"][0][ref_cam_index]).cpu().numpy()
+            )
+            print(
+                f"[intrinsics] no real K provided; using DLT-estimated K:\n{self.camera_intric_rs}"
+            )
 
         if torch.isnan(pcd).any() or torch.isinf(pcd).any():
             print("[Reconstruction] NaN/Inf detected in Model Output! Cleaning...")
