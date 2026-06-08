@@ -51,7 +51,7 @@ class DataGenerator:
         config_path="./L3ROcc/configs/config.yaml",
         save_dir="./outputs",
         model_dir="./ckpt",
-        use_multimodal=True,
+        model_type="pi3x",
     ):
         """
         Initialize the DataGenerator.
@@ -60,11 +60,19 @@ class DataGenerator:
             config_path (str): Path to the configuration YAML file.
             save_dir (str): Directory where output files will be saved.
             model_dir (str): Root directory containing ckpt sub-folders:
-                             model_dir/pi3x  -- Pi3X multimodal weights (depth conditioning)
-                             model_dir/pi3   -- base Pi3 weights (RGB only)
-            use_multimodal (bool): If True, loads Pi3X from model_dir/pi3x (supports depth/intrinsic
-                                   conditioning). If False, loads base Pi3 from model_dir/pi3.
+                             model_dir/pi3x  -- Pi3X weights (accepts optional depth/intrinsic
+                                                conditioning at the model layer)
+                             model_dir/pi3   -- base Pi3 weights (RGB-only forward)
+            model_type (str): Which backbone to load. One of {"pi3", "pi3x"}.
+                              The checkpoint sub-directory is ``model_dir/<model_type>``.
+                              Pi3X.forward consumes depth/intrinsic kwargs when supplied;
+                              Pi3.forward only consumes imgs (any K/depth provided by the
+                              caller is still honored by post-processing — e.g. calibrated K
+                              still overrides the DLT-estimated K in the saved Parquet).
         """
+        if model_type not in {"pi3", "pi3x"}:
+            raise ValueError(f"model_type must be 'pi3' or 'pi3x', got {model_type!r}")
+
         self.config_path = config_path
         self.save_dir = save_dir
         if not os.path.exists(self.save_dir):
@@ -74,14 +82,14 @@ class DataGenerator:
         # Autocast dtype for model inference. Selected once: bfloat16 forces the model's
         # FlashAttention SDPA path, which is not built into every torch distribution.
         self.amp_dtype = self._select_amp_dtype()
-        self.use_multimodal = use_multimodal
-        ckpt_path = os.path.join(model_dir, "pi3x" if use_multimodal else "pi3")
+        self.model_type = model_type
+        ckpt_path = os.path.join(model_dir, model_type)
         self.model = (
-            self._load_pretrained_model(ckpt_path, use_multimodal)
+            self._load_pretrained_model(ckpt_path, model_type)
             .to(self.device)
             .eval()
         )
-        print(f"Loaded {'Pi3X (multimodal)' if use_multimodal else 'Pi3 (RGB-only)'} from {ckpt_path}")
+        print(f"Loaded {'Pi3X' if model_type == 'pi3x' else 'Pi3'} from {ckpt_path}")
 
         self.free_label = 0
         self.pcd = None
@@ -113,7 +121,7 @@ class DataGenerator:
         )  # Fixed-length queue for sliding window
         self.save_path = self.save_dir
 
-    def _load_pretrained_model(self, ckpt_path, use_multimodal):
+    def _load_pretrained_model(self, ckpt_path, model_type):
         """Load Pi3X / Pi3 weights via the standard ``from_pretrained`` (returns CPU model;
         caller moves it to device).
 
@@ -125,7 +133,7 @@ class DataGenerator:
         is lazy, that monkeypatch (done before this module's deps are constructed) takes effect.
         On Linux/server this is just the native fast path.
         """
-        if use_multimodal:
+        if model_type == "pi3x":
             from third_party.pi3.pi3.models.pi3x import Pi3X
             return Pi3X.from_pretrained(ckpt_path)
         from third_party.pi3.pi3.models.pi3 import Pi3
@@ -165,7 +173,7 @@ class DataGenerator:
             input_path (str): Path to the input video file.
             condit_depth_path (str): Path to the conditional depth map (used by Pi3X only).
             intrinsics_np (np.ndarray): 3x3 intrinsic matrix at the ORIGINAL video resolution.
-                - When use_multimodal=True, it is rescaled to model input size and fed to Pi3X.
+                - When model_type='pi3x', it is rescaled to model input size and fed to Pi3X.
                 - In both modes, the rescaled K replaces the DLT-estimated K in ``camera_intric_rs``
                   so the downstream Parquet stores the calibrated K instead of the model's estimate.
 
@@ -176,15 +184,14 @@ class DataGenerator:
                 - norm_cam_ray ): Normalized camera ray directions (H*W, 3).
         """
         # Load all frames, resize to uniform size, and convert to Tensor [N, 3, H, W].
-        # When use_multimodal, also build the depth / intrinsic conditions for Pi3X.
+        # When model_type='pi3x', also build the depth / intrinsic conditions for Pi3X.
         imgs, traj_len, conditions = load_images_as_tensor(
             input_path,
             interval=self.interval,
             condit_depth_path=condit_depth_path,
             intrinsics_np=intrinsics_np,
             device=self.device,
-        )
-        imgs = imgs.to(self.device)  # [N, 3, H, W]
+        )  # imgs: [N, 3, H, W] on self.device
 
         # ``K_rescaled`` is metadata (numpy K at resized resolution), not a Pi3X kwarg —
         # pop it before splatting so ``model(**conditions)`` does not see an unknown argument.
@@ -195,7 +202,7 @@ class DataGenerator:
         dtype = self.amp_dtype
         with torch.no_grad():
             with torch.amp.autocast("cuda", dtype=dtype):
-                if self.use_multimodal:
+                if self.model_type == "pi3x":
                     res = self.model(imgs[None], **conditions)  # Add batch dimension [1, N, 3, H, W]
                 else:
                     res = self.model(imgs[None])  # Add batch dimension [1, N, 3, H, W]
@@ -209,7 +216,7 @@ class DataGenerator:
         # )  # Filter depth edges to sharpen point cloud boundaries
         
         # Filter noise using masks
-        if self.use_multimodal and (condit_depth_path is not None):
+        if self.model_type == "pi3x" and (condit_depth_path is not None):
             # 适度放宽带有真实传感器深度的检测：适当降低置信度，增加深度边缘容忍度
             masks = (torch.sigmoid(res["conf"][..., 0]) > 0.05) 
             non_edge = ~depth_edge(res["local_points"][..., 2], rtol=0.15) # 容忍更大范围的深度突变

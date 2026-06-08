@@ -26,7 +26,8 @@
 This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning)** as its foundational reconstruction engine, and implements a fully automated pipeline for data labeling and alignment that is customized for navigation learning tasks. All processed data adheres to the **LeRobotDataset v2.1** specification. In practical testing, processing a 16-second video segment using this pipeline requires roughly 15 seconds to produce occupancy (occ) and mask data.
 
 ## 📢 What's New (Latest Updates)
-- **Dual-Model & Depth Conditioning:** Now supports both `Pi3` (RGB-only) and `Pi3X` (multimodal). Pi3X can accept an optional camera depth map as conditioning input (`--model_type pi3x --use_depth true`), further improving absolute scale accuracy when high-quality depth data is available.
+- **Decoupled Multi-Optional Inputs:** RGB (required), calibrated intrinsics (optional), and depth (optional) are now fully decoupled at every pipeline entry point (CLI / generator constructor / `pcd_reconstruction`). Any combination is valid — RGB-only, RGB+K, RGB+depth, RGB+K+depth — and the three flags `--use_depth` / `--use_intrinsic` / `--condit_intr_path` toggle them independently.
+- **Unified Model Interface (`--model_type`):** Both backbones now share a single CLI flag — `--model_type pi3` (RGB-only forward) or `--model_type pi3x` (consumes optional K/depth conditioning at the model layer). The legacy `use_multimodal` parameter has been removed project-wide. When Pi3 is selected with a calibrated K, the K still overrides the DLT-estimated intrinsic saved to Parquet (post-processing path is model-agnostic).
 - **Physical Scale Alignment:** The generation pipeline now applies a dynamic scaling factor to the Pi3 model's point cloud output, ensuring the reconstructed 3D scenes are strictly aligned with real-world metric dimensions.
 - **Base Frame Occupancy:** Per-frame occupancy data is now explicitly transformed and anchored to the **robot base coordinate system** (rather than the local camera frame), significantly streamlining downstream embodied AI navigation and control tasks.
 - **Smart Data Integrity Checks:** Introduced strict file existence validation. The pipeline now verifies all expected output artifacts for a trajectory before skipping, preventing incomplete or corrupted data generation during batch processing.
@@ -34,7 +35,8 @@ This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 
 ## ✨ Key Features
 * **End-to-End Reconstruction**: Directly predicts affine-invariant camera poses and metric-scale point clouds from RGB video streams.
-* **Flexible Model Selection**: Two backbone options — `Pi3` (RGB-only, lightweight) via `--model_type pi3`, or `Pi3X` (multimodal) via `--model_type pi3x`. Pi3X uniquely supports optional depth conditioning (`--use_depth true`) for improved absolute scale alignment.
+* **Flexible Model Selection**: Two backbone options under a single `--model_type` flag — `pi3` (RGB-only, lightweight) or `pi3x` (accepts optional intrinsic / depth conditioning at the model layer). Pi3X with `--use_depth true` further sharpens absolute scale alignment when high-quality depth is available.
+* **Decoupled Optional Inputs**: Calibrated camera intrinsics (`--use_intrinsic true` / `--condit_intr_path`) and depth (`--use_depth true` / `--condit_depth_path`) are independent — supply one, both, or neither. Calibrated intrinsics always override the DLT-estimated K saved to Parquet, regardless of the chosen backbone.
 * **Automated Voxelization**: Converts unstructured point clouds into structured Occupancy Grids.
 * **Visibility Analysis**: Performs real-time ray casting based on intrinsic and extrinsic parameters of camera to compute visible regions (Visible Masks) and occlusion relationships.
 * **4D Data Serialization**:
@@ -45,7 +47,7 @@ This project employs **$\pi^3$ (Permutation-Equivariant Visual Geometry Learning
 
 ## 💡 Future Work 
 - [ ] **Semantic Point Cloud**: Integrate semantic segmentation and instance segmentation to enhance reconstruction quality.
-- [x] **Multi-modal Fusion**: Pi3X now supports depth map conditioning (`--model_type pi3x --use_depth true`) for improved absolute scale accuracy. See [Scale Experiment](#-scale-accuracy-study-pi3x-metric-head-vs-depth-derived-scale) for benchmark results.
+- [x] **Multi-modal Fusion**: Pi3X accepts decoupled, optional depth and intrinsic conditioning (`--model_type pi3x --use_depth true --use_intrinsic true`) for improved absolute scale accuracy. See [Scale Experiment](#-scale-accuracy-study-pi3x-metric-head-vs-depth-derived-scale) for benchmark results.
 
 
 ## 🚀 Quick Start
@@ -84,43 +86,66 @@ ckpt/
 ├── pi3/                   # Base Pi3 weights (RGB-only)
 │   ├── model.safetensors
 │   └── config.json
-└── pi3x/                  # Pi3X multimodal weights (RGB-only or RGB+depth)
+└── pi3x/                  # Pi3X weights (RGB-only, or RGB + optional intrinsic / depth conditioning)
     ├── model.safetensors
     └── config.json
 ```
 
-| Model | Input | HuggingFace ID | Direct Download |
-|-------|-------|----------------|-----------------|
+| Model | Model-level inputs | HuggingFace ID | Direct Download |
+|-------|--------------------|----------------|-----------------|
 | **Pi3** | RGB only | [`yyfz233/Pi3`](https://huggingface.co/yyfz233/Pi3) | [model.safetensors](https://huggingface.co/yyfz233/Pi3/resolve/main/model.safetensors) |
-| **Pi3X** | RGB (+ optional depth) | [`yyfz233/Pi3X`](https://huggingface.co/yyfz233/Pi3X) | [model.safetensors](https://huggingface.co/yyfz233/Pi3X/resolve/main/model.safetensors) |
+| **Pi3X** | RGB + optional intrinsic + optional depth | [`yyfz233/Pi3X`](https://huggingface.co/yyfz233/Pi3X) | [model.safetensors](https://huggingface.co/yyfz233/Pi3X/resolve/main/model.safetensors) |
+
+> **Note on calibrated intrinsics**: even when `--model_type pi3` is selected (Pi3.forward only consumes RGB), `--use_intrinsic true` is still honored by the **post-processing path** — the rescaled calibrated K replaces the model's back-calculated K in the saved Parquet column `observation.camera_intrinsic_occ`.
 
 > If automatic download from Hugging Face is slow, use the direct download links above and place the files in the corresponding subdirectory.
 
 ### 3. Run Example （The pipeline supports three primary modes）:
 
+The CLI exposes three independent input toggles that can be freely combined:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--use_intrinsic true\|false` | `true` | Load calibrated K from `--condit_intr_path` (info.json). Used as Pi3X conditioning **and** to override the saved Parquet K. |
+| `--use_depth true\|false` | `true` | Load depth from `--condit_depth_path` (mkv/mp4) as Pi3X conditioning. Silently ignored at the model layer when `--model_type pi3`. |
+| `--model_type {pi3,pi3x}` | `pi3x` | Backbone selection. Replaces the previous `use_multimodal` flag. |
+
 #### Mode A: Generate Visualized Dynamic Video
 Use this to create side-by-side comparison videos from your own footage with history frames.
 
 ```bash
-# Pi3X RGB-only (default, recommended)
+# Variant A1: Pi3X RGB-only (lightest)
 python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
-    --save_dir data/examples/outputs/ --model_type pi3x --use_depth false \
-    --pcd_save True --mode visual --mesh False
+    --save_dir data/examples/outputs/ \
+    --model_type pi3x --use_depth false --use_intrinsic false \
+    --pcd_save true --mode visual --mesh false
 
-# Pi3X with depth conditioning (requires depth video + intrinsic JSON)
+# Variant A2: Pi3X RGB + calibrated intrinsic (no depth) — better K accuracy
+python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
+    --condit_intr_path data/examples/info.json \
+    --save_dir data/examples/outputs/ \
+    --model_type pi3x --use_depth false --use_intrinsic true \
+    --pcd_save true --mode visual --mesh false
+
+# Variant A3: Pi3X RGB + intrinsic + depth conditioning (best metric scale)
 python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
     --condit_depth_path data/examples/depth.mkv \
     --condit_intr_path data/examples/info.json \
-    --save_dir data/examples/outputs/ --model_type pi3x --use_depth true \
-    --pcd_save True --mode visual --mesh False
+    --save_dir data/examples/outputs/ \
+    --model_type pi3x --use_depth true --use_intrinsic true \
+    --pcd_save true --mode visual --mesh false
 ```
 
 #### Mode B: Generate LeRobot-compatible Data
-Use this to generate the standard dataset structure for model training.
+Use this to generate the standard dataset structure for model training. The same three input toggles apply.
+
 ```bash
+# Pi3X with calibrated intrinsic, no depth (recommended default)
 python tools/run_normal_data_occ.py --video_path data/examples/office.mp4 \
-    --save_dir data/examples/outputs/ --model_type pi3x --use_depth false \
-    --pcd_save True --mode run --mesh False
+    --condit_intr_path data/examples/info.json \
+    --save_dir data/examples/outputs/ \
+    --model_type pi3x --use_depth false --use_intrinsic true \
+    --pcd_save true --mode run --mesh false
 ```
 
 #### Mode C: Batch Process InternData-N1 Dataset
@@ -129,27 +154,47 @@ This mode supports **breakpoint resumption** with the following logic:
 - `mask_sequence.npz` (final result file) exists: Skip processing and continue with the next trajectory.
 - `overwrite=True`: Force reprocessing and overwrite existing files.
 - Otherwise: Proceed with processing.
+
 ```bash
-python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data --output_root data/examples/small_vln_n1_4/traj_data --pcd_save True --overwrite False --mesh False
+# Default: Pi3X + calibrated intrinsic from parquet, no depth conditioning
+python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data \
+    --output_root data/examples/small_vln_n1_4/traj_data \
+    --model_type pi3x --use_intrinsic true --use_depth false \
+    --pcd_save true --overwrite false --mesh false
+
+# Pi3X with depth conditioning (requires per-trajectory depth videos under
+# videos/chunk-000/observation.video.depth/ or observation.images.depth/)
+python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data \
+    --output_root data/examples/small_vln_n1_4/traj_data \
+    --model_type pi3x --use_intrinsic true --use_depth true \
+    --pcd_save true --overwrite false --mesh false
 ```
 
-**Model selection summary:**
+The InternData-N1 generator now supports the same decoupled RGB / intrinsic / depth
+inputs as Mode A/B. Intrinsic priority: `--condit_intr_path` (external info.json) >
+`observation.camera_intrinsic` column in parquet > DLT fallback.
 
-| `--model_type` | `--use_depth` | Description |
-|---|---|---|
-| `pi3` | `false` | Pi3, RGB-only (lightweight) |
-| `pi3x` | `false` | Pi3X, RGB-only with metric head (recommended default) |
-| `pi3x` | `true` | Pi3X + depth conditioning (best scale accuracy with quality depth data) |
+**Model + input matrix:**
+
+| `--model_type` | `--use_intrinsic` | `--use_depth` | Description |
+|---|---|---|---|
+| `pi3` | `false` | `false` | Pi3 RGB-only (lightweight). DLT-estimated K saved to Parquet. |
+| `pi3` | `true` | `false` | Pi3 RGB-only at the model layer, but the calibrated K still **overrides** the saved Parquet K (post-processing path). |
+| `pi3x` | `false` | `false` | Pi3X RGB-only with metric head. |
+| `pi3x` | `true` | `false` | Pi3X with intrinsic conditioning. Sharpens DLT K and unlocks Pi3X intrinsic-aware encoder path. |
+| `pi3x` | `true` | `true` | Pi3X full multimodal (recommended when high-quality depth is available — best scale accuracy). |
+
+> `--use_intrinsic` and `--use_depth` are independent toggles. Combinations like `pi3x` + `use_depth=true` + `use_intrinsic=false` are valid but rarely useful, because Pi3X internally derives camera rays from K — supplying depth without K forces the model to fall back to its ray prior. CLI prints `[Warning]` / `[Info]` hints to flag suboptimal combinations.
 
 
 ## 🛠️ Pipeline Details
 
 ### 1. Data Generators
 
-Located in `L3ROcc/generater/`, the project includes two core generators:
+Located in `L3ROcc/generater/`, the project includes two core generators. Both share the unified `model_type={"pi3","pi3x"}` constructor flag and the decoupled `(condit_depth_path, intrinsics_np)` keyword arguments on `run_pipeline` / `visual_pipeline` / `single_frame_pipeline`:
 
 * **SimpleVideoDataGenerator**: Best for individual videos; automatically builds standard directory structures including `meta/`, `videos/`, and `data/`.
-* **InternData-N1DataGenerator**: Designed for large-scale InternData-N1 data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth.
+* **InternNavDataGenerator**: Designed for large-scale InternData-N1 data enhancement; supports **Scale Alignment** using Sim3 to ensure reconstruction coordinates match ground truth. Per-trajectory intrinsics are auto-loaded from the source Parquet's `observation.camera_intrinsic` column; depth videos are auto-discovered under `videos/chunk-000/observation.video.depth/` or `observation.images.depth/`.
 
 ### 2. Core Configuration
 
@@ -181,21 +226,27 @@ trajectory_1/
 │   ├── episodes_stats.jsonl       # Feature statistics (min/max/mean/std)
 │   └── tasks.jsonl                # Task descriptions
 └── videos/
-    └── chunk-000/                 # Temporal Sequences
+    └── chunk-000/                  # Temporal Sequences
         ├── observation.occ.mask/
-        │   └── mask_sequence.npz  # Temporal visibility bitmask
+        │   └── mask_sequence.npz   # Temporal visibility bitmask
         ├── observation.occ.view/
-        │   └── occ_sequence.npz   # Temporal egocentric occupancy
-        └── observation.video.trajectory/
-            └── reference.mp4      # Original RGB source video
+        │   └── occ_sequence.npz    # Temporal egocentric occupancy
+        ├── observation.video.trajectory/
+        │   └── reference.mp4       # Original RGB source video (REQUIRED input)
+        └── observation.video.depth/        # OPTIONAL: depth video for --use_depth true
+            └── reference.mkv               # alt: observation.images.depth/*.{mkv,mp4}
 ```
+
+> The depth sub-directory is **optional**. When `--use_depth true` is passed but no depth file is discovered under either `observation.video.depth/` or `observation.images.depth/`, the trajectory still processes — the run simply logs a warning and degrades to RGB-only at the model layer.
 
 ##### i. data/chunk-000/ (Core Geometric Assets)
 - **all_occ.npz**: Stores the global occupancy grid of the entire scene in world coordinates.
 - **origin_pcd.ply**: The initial global point cloud reconstructed from the video, optimized via voxel downsampling for efficient processing.
 - **episode_000000.parquet**: A structured data table containing per-frame high-level features:
-  - **Camera Intrinsics_occ**: 3x3 matrices re-estimated via Least Squares/DLT based on local geometry.
-  - **Camera Extrinsics_occ**: 4x4 extrinsic matrices predicted by the π³ model and aligned to world coordinates.
+  - **`observation.camera_intrinsic_occ`**: 3x3 intrinsic matrix at the **model-input resolution**. Population depends on `--use_intrinsic`:
+    - **`--use_intrinsic true`** (with a valid `--condit_intr_path` or per-trajectory parquet K): the calibrated K is rescaled to model input size and written here, overriding any model-side estimate. Works for both `pi3` and `pi3x` (post-processing path is backbone-agnostic).
+    - **`--use_intrinsic false`** (or no calibration available): the K is back-estimated from local geometry via Least Squares / DLT on the model's `local_points`.
+  - **`observation.camera_extrinsic_occ`**: 4x4 extrinsic matrices predicted by the π³ backbone, aligned to world coordinates, and optionally rescaled by the Sim3 scale factor (InternData-N1 only).
 
 ##### ii. meta/ (Metadata & Statistics)
 - **info.json**: Defines the dataset schema, including the data types and shapes for observation.camera_extrinsic_occ and observation.camera_intrinsic_occ.
@@ -226,7 +277,7 @@ Outputs generated by the `visual_pipeline` are tailored for rendering and manual
 We benchmarked two approaches for obtaining **absolute metric scale** in Pi3X 3D reconstruction:
 the model's own **metric head** (RGB-only) vs. a scale factor **derived from real camera depth maps**.
 
-**Setup**: 32 valid robot episodes (12 near-static episodes excluded); ground truth from robot odometry — independent of both the vision model and the depth sensor.
+**Setup**: 32 valid robot episodes (12 near-static episodes excluded); ground truth from robot odometry — independent of both the vision model and the depth sensor. RGB and depth data captured with an **Orbbec Gemini 336** camera.
 
 | Scale Method | Description | Mean Error | Median Error | Std Dev | Win Rate |
 |---|---|---|---|---|---|

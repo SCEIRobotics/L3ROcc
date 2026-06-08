@@ -39,8 +39,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                     └── tasks.jsonl
     """
 
-    def __init__(self, config_path, save_dir, model_dir, use_multimodal=True):
-        super().__init__(config_path, save_dir, model_dir, use_multimodal=use_multimodal)
+    def __init__(self, config_path, save_dir, model_dir, model_type="pi3x"):
+        super().__init__(config_path, save_dir, model_dir, model_type=model_type)
         self.default_group = "custom_videos"
         self.default_traj_name = "trajectory_0"
 

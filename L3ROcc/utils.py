@@ -948,7 +948,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         }
 
     # --- 4. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
-    images_tensor = torch.stack(tensor_list, dim=0)
+    images_tensor = torch.stack(tensor_list, dim=0).to(device)
 
     N_out = images_tensor.shape[0]  # The actual number of successfully loaded RGB frames
 

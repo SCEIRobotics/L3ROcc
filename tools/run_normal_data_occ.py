@@ -41,7 +41,7 @@ def run_normal_data_pipeline(args):
     mesh           = args.mesh
     use_depth      = args.use_depth          # bool
     use_intrinsic  = args.use_intrinsic      # bool, decoupled from use_depth
-    use_multimodal = args.model_type == "pi3x"
+    is_pi3         = args.model_type == "pi3"
 
     # Quick verification: process only the first N frames to validate the whole data path fast.
     max_frames = args.quick_frames if args.quick else None
@@ -50,14 +50,14 @@ def run_normal_data_pipeline(args):
               "trajectory frames will be processed.")
 
     # -------- Consistency check --------
-    if use_depth and not use_multimodal:
+    if use_depth and is_pi3:
         print("[Warning] use_depth=True but model_type='pi3'. "
               "Pi3 does NOT support depth conditioning — depth input will be ignored by the model.")
-    if use_intrinsic and not use_multimodal:
+    if use_intrinsic and is_pi3:
         print("[Info] use_intrinsic=True but model_type='pi3'. "
               "Pi3 does NOT support intrinsic conditioning, but the calibrated K will still be "
               "saved to the dataset (overriding the model's back-calculated K).")
-    if not use_depth and not use_intrinsic and use_multimodal:
+    if not use_depth and not use_intrinsic and not is_pi3:
         print("[Info] model_type='pi3x' with no depth/intrinsic. "
               "Pi3X runs in RGB-only mode; saved K will be the model's back-calculated estimate.")
 
@@ -83,10 +83,10 @@ def run_normal_data_pipeline(args):
                   "Reconstruction will proceed without intrinsic conditioning.")
 
     # ================= 3. Initialization  =================
-    print(f"Initializing SimpleVideoDataGenerator  model={args.model_type}  "
+    print(f"Initializing SimpleVideoDataGenerator  model_type={args.model_type}  "
           f"use_depth={use_depth}  config={config_path}")
     generator = SimpleVideoDataGenerator(
-        config_path, save_dir, model_dir, use_multimodal=use_multimodal
+        config_path, save_dir, model_dir, model_type=args.model_type
     )
 
     # ================= 4. Execution  =================

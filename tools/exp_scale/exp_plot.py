@@ -34,15 +34,20 @@ def plot_episode(out_dir):
         M = json.load(f)
     d = np.load(os.path.join(out_dir, "plotdata.npz"))
     frame_idx = d["frame_idx"]
-    pred_d_rgb, pred_d_dc = d["pred_d_rgb"], d["pred_d_dc"]
+    pred_d_rgb = d["pred_d_rgb"]
+    pred_d_int = d["pred_d_int"]
+    pred_d_dc = d["pred_d_dc"]
     sensor_d, conf_rgb = d["sensor_d"], d["conf_rgb"]
     dmin, dmax, conf_thr = float(d["dmin"]), float(d["dmax"]), float(d["conf_thr"])
 
-    # 1) Headline: trajectory-length relative error per method ---------------------------
-    methods = ["model\n(RGB metric head)", "depth-scaled\n(RGB + sensor)", "model_dc\n(depth-conditioned)"]
-    errs = [M["e_model"] * 100, M["e_depth"] * 100, M["e_model_dc"] * 100]
+    # 统一三变体颜色:RGB-only 红、RGB+intr 绿、RGB+intr+depth 蓝
+    C_RGB, C_INT, C_DC = "#d9534f", "#5cb85c", "#5bc0de"
+
+    # 1) Headline: trajectory-length relative error per variant --------------------------
+    methods = ["model\n(RGB only)", "model_int\n(RGB + intr)", "model_dc\n(RGB + intr + depth)"]
+    errs = [M["e_model"] * 100, M["e_model_int"] * 100, M["e_model_dc"] * 100]
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    bars = ax.bar(methods, errs, color=["#d9534f", "#5cb85c", "#5bc0de"])
+    bars = ax.bar(methods, errs, color=[C_RGB, C_INT, C_DC])
     for b, e in zip(bars, errs):
         ax.text(b.get_x() + b.get_width() / 2, b.get_height(), f"{e:.1f}%",
                 ha="center", va="bottom", fontsize=11)
@@ -51,42 +56,46 @@ def plot_episode(out_dir):
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "1_headline_error.png"), dpi=140); plt.close(fig)
 
-    # 2) Correction factor vs the ideal (Umeyama) factor --------------------------------
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    names = ["model (c=1)", "depth (s_depth)", "GT-optimal (Umeyama)"]
-    vals = [1.0, M["s_depth"], M["c_gt_rgb"]]
-    ax.bar(names, vals, color=["#d9534f", "#5cb85c", "#999999"])
-    ax.axhline(M["c_gt_rgb"], color="k", ls="--", lw=1, label=f"ideal c_gt={M['c_gt_rgb']:.3f}")
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=11)
-    ax.set_ylabel("Correction factor on RGB-only reconstruction")
-    ax.set_title("Which correction lands closest to the GT-optimal scale?")
+    # 2) Each variant's metric vs its own GT-optimal Umeyama scale ----------------------
+    # 三变体都直接信任 metric 头(c=1),对比 1.0 与各自理想 c_gt_*。
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    names = ["model", "model_int", "model_dc"]
+    c_gts = [M["c_gt_rgb"], M["c_gt_int"], M["c_gt_dc"]]
+    x = np.arange(len(names))
+    w = 0.35
+    bars_used = ax.bar(x - w / 2, [1.0] * len(names), w, color=[C_RGB, C_INT, C_DC], label="metric head (c=1)")
+    bars_ideal = ax.bar(x + w / 2, c_gts, w, color="#999999", label="GT-optimal (Umeyama)")
+    for i, v in enumerate(c_gts):
+        ax.text(i + w / 2, v, f"{v:.3f}", ha="center", va="bottom", fontsize=10)
+    ax.set_xticks(x); ax.set_xticklabels(names)
+    ax.set_ylabel("Scale")
+    ax.set_title("Metric-head scale (=1) vs the GT-optimal scale per variant")
     ax.legend()
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "2_correction_factor.png"), dpi=140); plt.close(fig)
 
-    # 3) Per-frame scale drift ----------------------------------------------------------
+    # 3) Per-frame depth ratio (诊断:每种变体的预测深度是否系统偏离传感器) ---------
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(frame_idx, M["s_per_frame_rgb"], "-o", ms=3, color="#d9534f", label="RGB-only: median(D_sensor/D_pred)")
-    ax.plot(frame_idx, M["s_per_frame_dc"], "-o", ms=3, color="#5bc0de", label="depth-cond: median(D_sensor/D_pred)")
-    ax.axhline(M["c_gt_rgb"], color="k", ls="--", lw=1, label=f"GT-optimal scale = {M['c_gt_rgb']:.3f}")
+    ax.plot(frame_idx, M["s_per_frame_rgb"], "-o", ms=3, color=C_RGB, label="model: median(D_sensor/D_pred)")
+    ax.plot(frame_idx, M["s_per_frame_int"], "-o", ms=3, color=C_INT, label="model_int: median(D_sensor/D_pred)")
+    ax.plot(frame_idx, M["s_per_frame_dc"], "-o", ms=3, color=C_DC, label="model_dc: median(D_sensor/D_pred)")
     ax.axhline(1.0, color="gray", ls=":", lw=1, label="1.0 (model perfectly metric)")
     ax.set_xlabel("frame index"); ax.set_ylabel("sensor/pred depth ratio")
-    ax.set_title("Per-frame implied scale (drift & bias)")
+    ax.set_title("Per-frame sensor/pred depth ratio (drift & bias)")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "3_per_frame_scale.png"), dpi=140); plt.close(fig)
 
     # 4) Cumulative trajectory length ---------------------------------------------------
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(M["cum_gt"], "-o", ms=3, color="k", label=f"GT (odometry)  L={M['L_gt']:.3f} m")
-    ax.plot(M["cum_model"], "-o", ms=3, color="#d9534f", label=f"model  L={M['L_model']:.3f} m")
-    ax.plot(M["cum_depth"], "-o", ms=3, color="#5cb85c", label=f"depth-scaled  L={M['s_depth']*M['L_model']:.3f} m")
-    ax.plot(M["cum_dc"], "-o", ms=3, color="#5bc0de", label=f"model_dc  L={M['L_model_dc']:.3f} m")
+    ax.plot(M["cum_model"], "-o", ms=3, color=C_RGB, label=f"model  L={M['L_model']:.3f} m")
+    ax.plot(M["cum_model_int"], "-o", ms=3, color=C_INT, label=f"model_int  L={M['L_model_int']:.3f} m")
+    ax.plot(M["cum_model_dc"], "-o", ms=3, color=C_DC, label=f"model_dc  L={M['L_model_dc']:.3f} m")
     ax.set_xlabel("kept-frame index"); ax.set_ylabel("cumulative camera path length (m)")
     ax.set_title("Cumulative trajectory length vs GT")
     ax.legend(fontsize=8); ax.grid(alpha=0.3)
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "4_cumulative_length.png"), dpi=140); plt.close(fig)
 
-    # 5) Depth agreement scatter (pred vs sensor) ---------------------------------------
+    # 5) Depth agreement scatter (pred vs sensor) per variant ---------------------------
     def scatter_panel(ax, pred_d, title):
         xs, ys = [], []
         for i in range(pred_d.shape[0]):
@@ -110,9 +119,10 @@ def plot_episode(out_dir):
         ax.set_xlabel("sensor depth (m)"); ax.set_ylabel("pred depth (m)")
         ax.set_title(f"{title}\nmedian pred/sensor = {slope:.3f}"); ax.legend(fontsize=8)
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-    scatter_panel(axes[0], pred_d_rgb, "RGB-only")
-    scatter_panel(axes[1], pred_d_dc, "depth-conditioned")
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    scatter_panel(axes[0], pred_d_rgb, "model (RGB only)")
+    scatter_panel(axes[1], pred_d_int, "model_int (RGB + intr)")
+    scatter_panel(axes[2], pred_d_dc, "model_dc (RGB + intr + depth)")
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "5_depth_scatter.png"), dpi=140); plt.close(fig)
 
     # 6) Sample depth error maps --------------------------------------------------------
@@ -145,13 +155,13 @@ def plot_summary(out_dir):
         print("[viz] summary.json 无有效 episode，跳过汇总图。")
         return
 
-    methods = ["model", "depth", "model_dc"]
-    colors = {"model": "#d9534f", "depth": "#5cb85c", "model_dc": "#5bc0de"}
+    methods = ["model", "model_int", "model_dc"]
+    colors = {"model": "#d9534f", "model_int": "#5cb85c", "model_dc": "#5bc0de"}
     agg = S["agg"]
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
 
-    # A) 三方法误差的均值±标准差 -------------------------------------------------------
+    # A) 三变体误差的均值±标准差 -------------------------------------------------------
     means = [agg[f"e_{m}"]["mean"] * 100 if agg.get(f"e_{m}") else 0.0 for m in methods]
     stds = [agg[f"e_{m}"]["std"] * 100 if agg.get(f"e_{m}") else 0.0 for m in methods]
     bars = axes[0].bar(methods, means, yerr=stds, capsize=5,
@@ -163,7 +173,7 @@ def plot_summary(out_dir):
     axes[0].set_title(f"Mean±std error  (n={S['n_episodes']})")
     axes[0].grid(axis="y", alpha=0.3)
 
-    # B) 各方法"最优次数" ---------------------------------------------------------------
+    # B) 各变体"最优次数" ---------------------------------------------------------------
     wins = S.get("win_counts", {})
     wbars = axes[1].bar(methods, [wins.get(m, 0) for m in methods],
                         color=[colors[m] for m in methods])
@@ -174,19 +184,20 @@ def plot_summary(out_dir):
     axes[1].set_title("Win counts")
     axes[1].grid(axis="y", alpha=0.3)
 
-    # C) 逐 episode 的 s_depth vs c_gt 散点(看深度尺度是否更接近真值理想尺度) ----------
-    c_gt = [r["c_gt_rgb"] for r in rows if r.get("c_gt_rgb") is not None]
-    s_dep = [r["s_depth"] for r in rows if r.get("s_depth") is not None]
-    if c_gt and s_dep:
-        axes[2].scatter(c_gt, s_dep, s=28, color="#5cb85c", label="depth (s_depth)", zorder=3)
-        axes[2].scatter(c_gt, [1.0] * len(c_gt), s=28, color="#d9534f", marker="x",
-                        label="model (c=1)", zorder=3)
-        lo = min(min(c_gt), min(s_dep), 1.0) * 0.95
-        hi = max(max(c_gt), max(s_dep), 1.0) * 1.05
-        axes[2].plot([lo, hi], [lo, hi], "k--", lw=1, label="y = x (ideal)")
-        axes[2].set_xlim(lo, hi); axes[2].set_ylim(lo, hi)
-        axes[2].set_xlabel("GT-optimal scale c_gt"); axes[2].set_ylabel("applied scale")
-        axes[2].set_title("Per-episode: closer to y=x is better")
+    # C) 各变体的"理想尺度 c_gt_*" 分布 ------------------------------------------------
+    # 三变体 metric 头都假定 scale=1.0,理想 c_gt_* 越接近 1 说明该变体 metric 越准。
+    c_gt_keys = {"model": "c_gt_rgb", "model_int": "c_gt_int", "model_dc": "c_gt_dc"}
+    plotted = False
+    for m in methods:
+        vals = [r.get(c_gt_keys[m]) for r in rows]
+        vals = [v for v in vals if v is not None and np.isfinite(v)]
+        if vals:
+            axes[2].scatter([m] * len(vals), vals, s=28, color=colors[m], alpha=0.6, zorder=3)
+            plotted = True
+    axes[2].axhline(1.0, color="k", ls="--", lw=1, label="ideal = 1.0 (metric head perfect)")
+    if plotted:
+        axes[2].set_ylabel("GT-optimal scale c_gt (per episode)")
+        axes[2].set_title("Per-episode ideal scale per variant\n(closer to 1.0 = metric head is more accurate)")
         axes[2].legend(fontsize=8); axes[2].grid(alpha=0.3)
 
     fig.tight_layout()

@@ -22,6 +22,7 @@ class InternNavDataGenerator(DataGenerator):
         config_path,
         save_dir,
         model_dir,
+        model_type="pi3x",
     ):
         """
         Initialize the InternNavDataGenerator.
@@ -30,8 +31,12 @@ class InternNavDataGenerator(DataGenerator):
             config_path (str): Path to the YAML configuration file.
             save_dir (str): Root directory where outputs will be saved.
             model_dir (str): Directory containing model checkpoints.
+            model_type (str): Which backbone to load. One of {"pi3", "pi3x"}.
+                Pi3X consumes depth/intrinsic kwargs at the model layer; Pi3 is RGB-only
+                at the forward pass but still honors any calibrated K at post-processing
+                (the rescaled K overrides the saved Parquet intrinsic).
         """
-        super().__init__(config_path, save_dir, model_dir)
+        super().__init__(config_path, save_dir, model_dir, model_type=model_type)
 
     def check_processing_status(self, input_path, overwrite=False):
         """
@@ -511,7 +516,14 @@ class InternNavDataGenerator(DataGenerator):
                 break
 
     def run_pipeline(
-        self, input_path, pcd_save=True, overwrite=False, mesh=False, T_cam2base=None
+        self,
+        input_path,
+        condit_depth_path=None,
+        intrinsics_np=None,
+        pcd_save=True,
+        overwrite=False,
+        mesh=False,
+        T_cam2base=None,
     ):
         """
         Executes the full data generation pipeline:
@@ -519,6 +531,12 @@ class InternNavDataGenerator(DataGenerator):
 
         Args:
             input_path (str): Path to the input video file.
+            condit_depth_path (str, optional): Path to a depth video (Pi3X conditioning input).
+                Ignored by the model when ``model_type='pi3'``. Defaults to None.
+            intrinsics_np (np.ndarray, optional): 3x3 intrinsic matrix at the ORIGINAL video
+                resolution. When provided, it is rescaled to the model input size and used
+                both for Pi3X conditioning (if multimodal) and to override the DLT-estimated K
+                in the saved ``observation.camera_intrinsic_occ`` column. Defaults to None.
             pcd_save (bool, optional): Whether to save 3D artifacts (point cloud, etc.). Defaults to True.
             overwrite (bool, optional): Whether to overwrite existing files. Defaults to False.
             mesh (bool, optional): Whether to use mesh instead of origin point cloud. Defaults to False.
@@ -532,7 +550,9 @@ class InternNavDataGenerator(DataGenerator):
             return
 
         # 3D Reconstruction
-        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(input_path)
+        pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
+            input_path, condit_depth_path, intrinsics_np
+        )
 
         # Align with Ground Truth Scale
         # self.camera_pose and pcd are updated to the aligned scale here

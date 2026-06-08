@@ -12,6 +12,15 @@ class InternNavSequenceLoader:
     sequences and manages paths for RGB images, metadata (Parquet), and video files.
     """
 
+    # Candidate sub-directories (relative to a trajectory root) under which a
+    # depth video may live. Probed in order; first hit wins. Both layouts have
+    # been observed in datasets that mirror the InternData-N1 chunk structure.
+    _DEPTH_CANDIDATE_DIRS = (
+        "videos/chunk-000/observation.video.depth",
+        "videos/chunk-000/observation.images.depth",
+    )
+    _DEPTH_CANDIDATE_EXTS = (".mkv", ".mp4")
+
     def __init__(self, root_dirs):
         self.root_dirs = root_dirs
 
@@ -20,6 +29,7 @@ class InternNavSequenceLoader:
         self.trajectory_rgb_paths = []  # Path to the RGB image folder
         self.trajectory_data_paths = []  # Path to the metadata .parquet file
         self.trajectory_video_paths = []  # Path to the .mp4 video file
+        self.trajectory_depth_paths = []  # Optional depth video; None if absent
 
         self._scan_dataset()
 
@@ -81,11 +91,27 @@ class InternNavSequenceLoader:
 
                     # Validate that all required components exist before registering
                     if os.path.exists(data_path) and video_file_path:
+                        depth_file_path = self._find_depth_video(entire_task_dir)
                         self.trajectory_dirs.append(entire_task_dir)
                         self.trajectory_data_paths.append(data_path)
                         self.trajectory_video_paths.append(video_file_path)
+                        self.trajectory_depth_paths.append(depth_file_path)
 
         print(f"Found {len(self.trajectory_dirs)} valid trajectories.")
+
+    def _find_depth_video(self, traj_dir):
+        """Probe conventional depth-video locations under a trajectory root.
+        Returns the first matching file path, or None if no depth exists.
+        Depth is optional, so absence is not a failure.
+        """
+        for rel_dir in self._DEPTH_CANDIDATE_DIRS:
+            cand_dir = os.path.join(traj_dir, rel_dir)
+            if not os.path.isdir(cand_dir):
+                continue
+            for f in sorted(os.listdir(cand_dir)):
+                if f.lower().endswith(self._DEPTH_CANDIDATE_EXTS):
+                    return os.path.join(cand_dir, f)
+        return None
 
     def __len__(self):
         return len(self.trajectory_dirs)
@@ -98,15 +124,19 @@ class InternNavSequenceLoader:
             index (int): The index of the trajectory sequence.
 
         Returns:
-            tuple: (video_path, camera_intrinsic)
-                - video_path (str): Absolute path to the video file.
-                - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix.
-                - camera_extrinsic (np.ndarray or None): 4x4 camera to base extrinsic matrix.
+            tuple: (video_path, camera_intrinsic, camera_extrinsic, depth_path)
+                - video_path (str): Absolute path to the RGB video file.
+                - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix
+                  at the ORIGINAL video resolution (parsed from parquet).
+                - camera_extrinsic (np.ndarray or None): 4x4 camera-to-base extrinsic.
+                - depth_path (str or None): Absolute path to an associated depth video
+                  if discovered under a conventional sub-directory, else None.
         """
 
         # 1. Retrieve stored paths
         video_path = self.trajectory_video_paths[index]
         data_path = self.trajectory_data_paths[index]
+        depth_path = self.trajectory_depth_paths[index]
 
         # 2. Parse Parquet data to extract camera intrinsics
         camera_intrinsic = None
@@ -130,4 +160,4 @@ class InternNavSequenceLoader:
             camera_intrinsic = None
             camera_extrinsic = None
 
-        return video_path, camera_intrinsic, camera_extrinsic
+        return video_path, camera_intrinsic, camera_extrinsic, depth_path

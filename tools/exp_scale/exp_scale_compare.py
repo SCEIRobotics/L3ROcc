@@ -1,19 +1,20 @@
 """
-实验：对于 Pi3X 的三维重建，哪个“绝对尺度(scale)”更准确 ——
-是模型自己预测的尺度(metric 头)，还是用相机真实深度图推算出来的尺度？
+实验：对于 Pi3X 的三维重建，哪种"输入模态组合"给出的绝对尺度(scale)更准？
+
+三个对比组(均使用 Pi3X 模型,均直接信任 res["metric"] 作为尺度):
+    * "model"     : 仅 RGB 输入                            (无任何 conditioning)
+    * "model_int" : RGB + 标定内参                          (intrinsics conditioning, 无 depth)
+    * "model_dc"  : RGB + 标定内参 + 传感器深度图           (intrinsics + depth conditioning)
+
+之所以从"RGB + 内参"独立出一组，是因为之前的 use_depth / use_intrinsic 耦合在一起,
+"只给内参不给深度"这一中间档无法测；解耦后(见 tools/run_normal_data_occ.py)才得以测试。
 
 真值(GT)采用机器人里程计轨迹(LeRobot parquet 中的 observation.state)，
-通过手眼标定(hand-eye)换算到相机坐标系下的相机中心轨迹。该真值与两个待比较的
-尺度来源(模型 metric 头、深度传感器)都相互独立，因此可以无循环依赖地公正裁定。
+通过手眼标定(hand-eye)换算到相机坐标系下的相机中心轨迹。该真值与三个待比较的
+变体都相互独立，因此可以无循环依赖地公正裁定。
 
-流程：先用 Pi3X 仅 RGB 跑一次，得到一个受控的“基准重建”，再用两种方式给它赋绝对尺度：
-    * "model" ：信任 res["metric"]                  -> 修正系数 c = 1.0
-    * "depth" ：s_depth = median(D_sensor/D_pred)    -> 修正系数 c = s_depth
-第三个变体 "model_dc" 则是把深度图作为条件输入再跑一次 Pi3X。
-
-每个变体都用“相机轨迹长度 vs 里程计真值长度”的相对误差来打分，
+每个变体都用"相机轨迹长度 vs 里程计真值长度"的相对误差来打分，
 并输出逐帧诊断曲线和若干可视化图。
-
 """
 
 import os
@@ -132,23 +133,23 @@ def load_gt_camera_positions(parquet_path, info_json_path, interval, n_keep):
     为(下采样后的)各帧构建真值相机中心轨迹。
 
     observation.state 共 14 维：x,y,z, vx,vy,vz, q_w,q_x,q_y,q_z, roll,pitch,yaw,yaw_speed
-    相机刚性安装在夹爪上：X_gripper = R_c2g @ X_cam + t_c2g，
-    因此相机中心在世界系下 = R_world_gripper @ t_c2g + p_gripper。
+    相机刚性安装在机器人上：X_robot = R_c2g @ X_cam + t_c2g，
+    因此相机中心在世界系下 = R_world_robot @ t_c2g + p_robot。
 
     返回：
         cam_pos   : (n_keep, 3) 下采样各帧的真值相机中心
-        grip_pos  : (n_keep, 3) 真值夹爪中心(忽略杆臂，用于对照检查)
+        grip_pos  : (n_keep, 3) 真值机器人中心(忽略连接结构，用于对照检查)
     """
     df = pd.read_parquet(parquet_path)
     state = np.stack(df["observation.state"].values).astype(np.float64)  # (T, 14)
     grip_pos_full = state[:, 0:3]
     quat_full = state[:, 6:10]  # (w, x, y, z)
 
-    # 手眼标定：从 info.json 取 t_cam2gripper(相机原点在夹爪坐标系中的位置)。
+    # 手眼标定：从 info.json 取 t_cam2robot(相机原点在机器人坐标系中的位置)。
     with open(info_json_path, "r", encoding="utf-8") as f:
         info = json.load(f)
     ext = info.get("head_camera_extrinsic", {})
-    t_c2g = np.asarray(ext.get("t_cam2gripper", [[0.0], [0.0], [0.0]]), dtype=np.float64).reshape(3)
+    t_c2g = np.asarray(ext.get("t_cam2robot", [[0.0], [0.0], [0.0]]), dtype=np.float64).reshape(3)
 
     R_wg = quat_wxyz_to_R(quat_full)                       # (T, 3, 3)
     cam_pos_full = np.einsum("tij,j->ti", R_wg, t_c2g) + grip_pos_full  # (T, 3)
@@ -298,33 +299,56 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
     sensor_d = conditions["depths"][0].float().cpu().numpy()  # (N, H, W) 米
     print(f"\n=== {label} === kept {N} frames @ {imgs.shape[-2]}x{imgs.shape[-1]}")
 
+    # 构造三组 conditions:
+    # - None              -> 仅 RGB (model)
+    # - {intrinsics 单独}  -> RGB + 标定内参 (model_int)
+    # - 完整 conditions    -> RGB + 内参 + 深度 (model_dc)
+    # K_rescaled 是 load_images_as_tensor 透传的元数据(非 Pi3X kwarg),run_pi3x 内部已过滤。
+    conditions_int = {k: v for k, v in conditions.items() if k != "depths"}
+    conditions_int["depths"] = None
+
     print("[run] Pi3X RGB-only ...")
     rgb = run_pi3x(gen, imgs, conditions=None)
-    print("[run] Pi3X depth-conditioned ...")
+    print("[run] Pi3X RGB + intrinsic ...")
+    intr = run_pi3x(gen, imgs, conditions=conditions_int)
+    print("[run] Pi3X RGB + intrinsic + depth ...")
     dc = run_pi3x(gen, imgs, conditions=conditions)
 
     gt_cam, gt_grip = load_gt_camera_positions(parquet_path, info_json_path, interval, N)
     n = min(N, len(gt_cam))
     gt_cam, gt_grip = gt_cam[:n], gt_grip[:n]
     rgb_pos = rgb["cam_pos"][:n]
+    intr_pos = intr["cam_pos"][:n]
     dc_pos = dc["cam_pos"][:n]
 
     L_gt = path_length(gt_cam)
     L_model = path_length(rgb_pos)
+    L_model_int = path_length(intr_pos)
     L_model_dc = path_length(dc_pos)
 
+    # 三个变体各自的 Umeyama 理想尺度 c_gt_*(把该变体轨迹对齐到 GT 所需的最优系数)。
+    # c_gt_rgb 保留旧名,作为汇总图与历史 metrics 字段兼容用。
     c_gt_rgb = umeyama_scale(rgb_pos, gt_cam)
     if not np.isfinite(c_gt_rgb):
         c_gt_rgb = L_gt / max(L_model, 1e-9)
+    c_gt_int = umeyama_scale(intr_pos, gt_cam)
+    if not np.isfinite(c_gt_int):
+        c_gt_int = L_gt / max(L_model_int, 1e-9)
+    c_gt_dc = umeyama_scale(dc_pos, gt_cam)
+    if not np.isfinite(c_gt_dc):
+        c_gt_dc = L_gt / max(L_model_dc, 1e-9)
 
-    s_pf_rgb, s_depth, _ = depth_scale_ratios(rgb["pred_depth"][:n], sensor_d[:n], rgb["conf"][:n],
-                                              args.conf_thr, args.dmin, args.dmax)
+    # 三个变体的"传感器深度 / 预测深度"中位比 —— 作为诊断量(metric 头有没有偏差)。
+    s_pf_rgb, s_depth_rgb, _ = depth_scale_ratios(rgb["pred_depth"][:n], sensor_d[:n], rgb["conf"][:n],
+                                                  args.conf_thr, args.dmin, args.dmax)
+    s_pf_int, s_depth_int, _ = depth_scale_ratios(intr["pred_depth"][:n], sensor_d[:n], intr["conf"][:n],
+                                                  args.conf_thr, args.dmin, args.dmax)
     s_pf_dc, s_depth_dc, _ = depth_scale_ratios(dc["pred_depth"][:n], sensor_d[:n], dc["conf"][:n],
                                                 args.conf_thr, args.dmin, args.dmax)
 
     L_gt_safe = max(L_gt, 1e-9)
     e_model = abs(L_model - L_gt) / L_gt_safe
-    e_depth = abs(s_depth * L_model - L_gt) / L_gt_safe
+    e_model_int = abs(L_model_int - L_gt) / L_gt_safe
     e_model_dc = abs(L_model_dc - L_gt) / L_gt_safe
 
     def cum(points, scale=1.0):
@@ -339,31 +363,44 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
         "n_frames": int(n),
         "skipped": skipped,
         "metric_rgb": rgb["metric"],
+        "metric_int": intr["metric"],
         "metric_dc": dc["metric"],
-        "s_depth": s_depth,
+        # 诊断:传感器深度 / 预测深度的中位比;模型若 metric 完美则该值 ≈ 1.0
+        "s_depth_rgb": s_depth_rgb,
+        "s_depth_int": s_depth_int,
         "s_depth_dc": s_depth_dc,
+        # 三个变体各自的理想尺度
         "c_gt_rgb": float(c_gt_rgb),
+        "c_gt_int": float(c_gt_int),
+        "c_gt_dc": float(c_gt_dc),
         "L_gt": L_gt,
-        "L_gt_gripper": path_length(gt_grip),
+        "L_gt_robot": path_length(gt_grip),
         "L_model": L_model,
+        "L_model_int": L_model_int,
         "L_model_dc": L_model_dc,
-        "L_depth": s_depth * L_model,
+        # 主评分:三变体轨迹长度相对误差(对 GT)
         "e_model": e_model,
-        "e_depth": e_depth,
+        "e_model_int": e_model_int,
         "e_model_dc": e_model_dc,
+        # 纯尺度误差:metric 头与各自理想尺度的偏离(剥离轨迹形状误差)
         "scale_err_model": abs(1.0 - c_gt_rgb) / c_gt_rgb,
-        "scale_err_depth": abs(s_depth - c_gt_rgb) / c_gt_rgb,
+        "scale_err_model_int": abs(1.0 - c_gt_int) / c_gt_int,
+        "scale_err_model_dc": abs(1.0 - c_gt_dc) / c_gt_dc,
+        # 逐帧深度比(诊断)
         "s_per_frame_rgb": s_pf_rgb.tolist(),
+        "s_per_frame_int": s_pf_int.tolist(),
         "s_per_frame_dc": s_pf_dc.tolist(),
+        # 累计轨迹长度
         "cum_gt": cum(gt_cam).tolist(),
         "cum_model": cum(rgb_pos).tolist(),
-        "cum_depth": cum(rgb_pos, s_depth).tolist(),
-        "cum_dc": cum(dc_pos).tolist(),
+        "cum_model_int": cum(intr_pos).tolist(),
+        "cum_model_dc": cum(dc_pos).tolist(),
     }
 
-    print(f"GT path {L_gt:.4f} m (gripper {M['L_gt_gripper']:.4f}) | metric RGB={rgb['metric']:.3f} dc={dc['metric']:.3f}"
-          f" | c_gt={c_gt_rgb:.3f} s_depth={s_depth:.3f}")
-    print(f"[model {e_model*100:5.2f}%] [depth {e_depth*100:5.2f}%] [model_dc {e_model_dc*100:5.2f}%]"
+    print(f"GT path {L_gt:.4f} m (robot {M['L_gt_robot']:.4f}) | metric RGB={rgb['metric']:.3f} "
+          f"int={intr['metric']:.3f} dc={dc['metric']:.3f}"
+          f" | c_gt rgb={c_gt_rgb:.3f} int={c_gt_int:.3f} dc={c_gt_dc:.3f}")
+    print(f"[model {e_model*100:5.2f}%] [model_int {e_model_int*100:5.2f}%] [model_dc {e_model_dc*100:5.2f}%]"
           + ("   (skipped: 近静止)" if skipped else ""))
 
     with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
@@ -375,6 +412,7 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
             os.path.join(out_dir, "plotdata.npz"),
             frame_idx=np.arange(n) * interval,
             pred_d_rgb=rgb["pred_depth"][:n].astype(np.float32),
+            pred_d_int=intr["pred_depth"][:n].astype(np.float32),
             pred_d_dc=dc["pred_depth"][:n].astype(np.float32),
             sensor_d=sensor_d[:n].astype(np.float32),
             conf_rgb=rgb["conf"][:n].astype(np.float32),
@@ -391,9 +429,13 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
 def write_summary(results, out_root):
     """把多 episode 的指标写成 summary.json / summary.csv，并返回 summary dict。"""
     import csv
-    keys = ["episode", "n_frames", "L_gt", "L_model", "L_model_dc", "s_depth", "c_gt_rgb",
-            "metric_rgb", "metric_dc", "e_model", "e_depth", "e_model_dc",
-            "scale_err_model", "scale_err_depth"]
+    keys = ["episode", "n_frames", "L_gt",
+            "L_model", "L_model_int", "L_model_dc",
+            "metric_rgb", "metric_int", "metric_dc",
+            "s_depth_rgb", "s_depth_int", "s_depth_dc",
+            "c_gt_rgb", "c_gt_int", "c_gt_dc",
+            "e_model", "e_model_int", "e_model_dc",
+            "scale_err_model", "scale_err_model_int", "scale_err_model_dc"]
     rows = [{k: M.get(k) for k in keys} for M in results]
 
     def agg(key):
@@ -402,16 +444,26 @@ def write_summary(results, out_root):
             return None
         return {"mean": float(np.mean(vals)), "median": float(np.median(vals)), "std": float(np.std(vals))}
 
-    win_counts = {"model": 0, "depth": 0, "model_dc": 0}
+    variants = ("model", "model_int", "model_dc")
+    win_counts = {v: 0 for v in variants}
     for M in results:
-        w = min(("model", "depth", "model_dc"), key=lambda k: M[f"e_{k}"])
+        w = min(variants, key=lambda k: M[f"e_{k}"])
         win_counts[w] += 1
+
+    agg_keys = (
+        # 主评分(轨迹长度误差)
+        "e_model", "e_model_int", "e_model_dc",
+        # 纯尺度误差
+        "scale_err_model", "scale_err_model_int", "scale_err_model_dc",
+        # 诊断量
+        "s_depth_rgb", "s_depth_int", "s_depth_dc",
+        "c_gt_rgb", "c_gt_int", "c_gt_dc",
+    )
 
     summary = {
         "n_episodes": len(rows),
         "win_counts": win_counts,
-        "agg": {k: agg(k) for k in ["e_model", "e_depth", "e_model_dc",
-                                     "s_depth", "c_gt_rgb", "scale_err_model", "scale_err_depth"]},
+        "agg": {k: agg(k) for k in agg_keys},
         "rows": rows,
     }
     with open(os.path.join(out_root, "summary.json"), "w", encoding="utf-8") as f:
@@ -436,7 +488,7 @@ def main():
     ap.add_argument("--episode", type=str, default="episode_001",
                     help="episode 名；用 'all' 处理该 rosbag 下全部 episode。")
     ap.add_argument("--out_dir", type=str,
-                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_out"))
+                    default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_out","20260604"))
     ap.add_argument("--conf_thr", type=float, default=0.1, help="像素有效所需的 Pi3X 最小置信度")
     ap.add_argument("--dmin", type=float, default=0.25, help="可信传感器深度下限(米)")
     ap.add_argument("--dmax", type=float, default=6.0, help="可信传感器深度上限(米)")
@@ -480,7 +532,7 @@ def main():
     config_path = os.path.join(_PROJECT_ROOT, "L3ROcc", "configs", "config.yaml")
     model_dir = os.path.join(_PROJECT_ROOT, "ckpt")
     os.makedirs(args.out_dir, exist_ok=True)
-    gen = SimpleVideoDataGenerator(config_path, args.out_dir, model_dir, use_multimodal=True)
+    gen = SimpleVideoDataGenerator(config_path, args.out_dir, model_dir, model_type="pi3x")
     # Windows 预加载的 state dict 已被 load_state_dict 复制进模型，释放它(~5.4GB)给推理腾内存。
     if sys.platform == "win32":
         globals().pop("_PI3X_SD", None)
@@ -507,7 +559,7 @@ def main():
               f"(跳过近静止 {len(results) - len(kept)} 个)。")
         if kept:
             s = write_summary(kept, args.out_dir)
-            for m in ("e_model", "e_depth", "e_model_dc"):
+            for m in ("e_model", "e_model_int", "e_model_dc"):
                 a = s["agg"][m]
                 if a:
                     print(f"  {m:12s} mean={a['mean']*100:5.2f}%  median={a['median']*100:5.2f}%")
