@@ -831,10 +831,46 @@ class DataGenerator:
             write_ply(traj_points, traj_colors, trajectory_ply_path)
             print(f"Saved Camera Trajectory to {trajectory_ply_path}")
 
-        occ_pcd_to_save = self.occ_pcd  # base coordinate
+        occ_pcd_to_save = self.occ_pcd
 
         if isinstance(occ_pcd_to_save, torch.Tensor):
             occ_pcd_to_save = occ_pcd_to_save.detach().cpu().numpy()
+
+        occ_frame_pcd = getattr(self, "occ_frame_pointcloud", None)
+        if occ_frame_pcd is not None:
+            if isinstance(occ_frame_pcd, torch.Tensor):
+                occ_frame_pcd = occ_frame_pcd.detach().cpu().numpy()
+            occ_frame_pcd = np.asarray(occ_frame_pcd, dtype=np.float32)
+            if occ_frame_pcd.ndim == 2 and occ_frame_pcd.shape[1] == 3:
+                occ_frame_pcd_path = paths.get(
+                    "occ_frame_pointcloud_ply",
+                    os.path.join(
+                        os.path.dirname(paths["global_occ"]),
+                        "occ_frame_pointcloud.ply",
+                    ),
+                )
+                occ_frame_colors = np.zeros_like(occ_frame_pcd, dtype=np.float32)
+                occ_frame_colors[:, 1] = 1.0  # Green point cloud in final OCC frame
+                write_ply(occ_frame_pcd, occ_frame_colors, occ_frame_pcd_path)
+                print(f"Saved OCC-frame Point Cloud to {occ_frame_pcd_path}")
+
+        occ_frame_traj = getattr(self, "occ_frame_camera_trajectory", None)
+        if occ_frame_traj is not None:
+            if isinstance(occ_frame_traj, torch.Tensor):
+                occ_frame_traj = occ_frame_traj.detach().cpu().numpy()
+            occ_frame_traj = np.asarray(occ_frame_traj, dtype=np.float32)
+            if occ_frame_traj.ndim == 2 and occ_frame_traj.shape[1] == 3:
+                traj_occ_ply_path = paths.get(
+                    "camera_trajectory_occ_frame_ply",
+                    os.path.join(
+                        os.path.dirname(paths["global_occ"]),
+                        "camera_trajectory_occ_frame.ply",
+                    ),
+                )
+                traj_occ_colors = np.zeros_like(occ_frame_traj, dtype=np.float32)
+                traj_occ_colors[:, 0] = 1.0  # Red trajectory points in final OCC frame
+                write_ply(occ_frame_traj, traj_occ_colors, traj_occ_ply_path)
+                print(f"Saved OCC-frame Camera Trajectory to {traj_occ_ply_path}")
 
         np.savez_compressed(
             paths["global_occ"], data=occ_pcd_to_save.astype(np.float32)
@@ -939,6 +975,8 @@ class DataGenerator:
         self.camera_pose = self.camera_pose.astype(np.float32)
         all_camera_poses = [[row for row in pose] for pose in self.camera_pose]
         camera_poses = torch.from_numpy(self.camera_pose).to(device).float()
+        self.occ_frame_pointcloud = None
+        self.occ_frame_camera_trajectory = None
         for i in range(total_frames):
             current_pose = camera_poses[i]
 
@@ -955,6 +993,29 @@ class DataGenerator:
                 )  # Shape: (-1, 3) in meters
             else:
                 pcd_points_base = pcd_points_cam
+
+            if i == total_frames - 1:
+                if isinstance(pcd_points_base, torch.Tensor):
+                    self.occ_frame_pointcloud = pcd_points_base.detach().cpu().numpy()
+                else:
+                    self.occ_frame_pointcloud = np.asarray(pcd_points_base)
+                traj_points_world = camera_poses[:, :3, 3]
+                traj_points_cam = self.convert_pointcloud_world_to_camera(
+                    traj_points_world, current_pose
+                )
+                traj_points_cam *= scale
+                if T_cam2base is not None:
+                    traj_points_base = self.convert_pointcloud_camera_to_base(
+                        traj_points_cam, T_cam2base
+                    )
+                else:
+                    traj_points_base = traj_points_cam
+                if isinstance(traj_points_base, torch.Tensor):
+                    self.occ_frame_camera_trajectory = (
+                        traj_points_base.detach().cpu().numpy()
+                    )
+                else:
+                    self.occ_frame_camera_trajectory = np.asarray(traj_points_base)
 
             # Convert to occupancy (pcd is maintained at aligned scale)
             self.occ_pcd = self.pcd_to_occ(pcd_points_base)

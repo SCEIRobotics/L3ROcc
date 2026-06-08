@@ -203,11 +203,13 @@ class InternNavSequenceLoader:
         """
 
         def _reshape_matrix(value, shape):
-            arr = np.array(value, dtype=np.float32)
+            arr = np.array(value)
             if arr.shape == shape:
                 return arr
             if arr.size == shape[0] * shape[1]:
                 return arr.reshape(shape)
+            if arr.size == shape[0]:
+                return np.stack(value)
             return None
 
         # 1. Retrieve stored paths
@@ -219,41 +221,36 @@ class InternNavSequenceLoader:
         # 2. Parse Parquet data to extract camera intrinsics / extrinsics
         camera_intrinsic = None
         camera_extrinsic = None
-        try:
-            df = pd.read_parquet(data_path)
 
-            if "observation.camera_intrinsic" in df.columns and len(df) > 0:
-                camera_intrinsic = _reshape_matrix(
-                    df["observation.camera_intrinsic"].tolist()[0], (3, 3)
-                )
+        df = pd.read_parquet(data_path)
 
-            if "observation.camera_extrinsic" in df.columns and len(df) > 0:
-                camera_extrinsic = _reshape_matrix(
-                    df["observation.camera_extrinsic"].tolist()[0], (4, 4)
-                )
+        if "observation.camera_intrinsic" in df.columns and len(df) > 0:
+            camera_intrinsic = _reshape_matrix(
+                df["observation.camera_intrinsic"].tolist()[0], (3, 3)
+            )
 
-            if camera_intrinsic is not None:
-                print(
-                    f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
-                )
-        except Exception as e:
-            print(f"Error reading parquet {data_path}: {e}")
+        if "observation.camera_extrinsic" in df.columns and len(df) > 0:
+            camera_extrinsic = _reshape_matrix(
+                df["observation.camera_extrinsic"].tolist()[0], (4, 4)
+            )
+
+        if camera_intrinsic is not None:
+            print(
+                f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
+            )
 
         # 3. Fallback: try meta/info.json for Pi3X conditioning intrinsics
         if camera_intrinsic is None:
             info_json_path = os.path.join(traj_root, "meta", "info.json")
             if os.path.exists(info_json_path):
-                try:
-                    with open(info_json_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                    if "head_camera_intrinsic" in meta:
-                        camera_intrinsic = _reshape_matrix(
-                            meta["head_camera_intrinsic"], (3, 3)
-                        )
-                        print(
-                            f"Loaded head_camera_intrinsic from info.json for trajectory {index}."
-                        )
-                except Exception as e:
-                    print(f"Error reading intrinsic json {info_json_path}: {e}")
+                with open(info_json_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                if "head_camera_intrinsic" in meta:
+                    camera_intrinsic = _reshape_matrix(
+                        meta["head_camera_intrinsic"], (3, 3)
+                    )
+                    print(
+                        f"Loaded head_camera_intrinsic from info.json for trajectory {index}."
+                    )
 
         return video_path, depth_path, camera_intrinsic, camera_extrinsic

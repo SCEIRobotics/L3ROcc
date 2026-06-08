@@ -537,9 +537,6 @@ class InternNavDataGenerator(DataGenerator):
 
         self.update_meta_episodes_jsonl(scale)
 
-        if not pcd_save:
-            return
-
         print("Start processing sequence frames...")
 
         paths = self.get_io_paths(input_path)
@@ -551,12 +548,13 @@ class InternNavDataGenerator(DataGenerator):
             )
         )
 
-        # Save global data
-        self.save_global_data(paths)
-
         # Save sequence data
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
 
         # Update metadata
         self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
+
+        if pcd_save:
+            # Save global data
+            self.save_global_data(paths)
