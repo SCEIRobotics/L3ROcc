@@ -73,8 +73,30 @@ if sys.platform == "win32":
 
     _Pi3X.from_pretrained = classmethod(_safe_from_pretrained)
 
+from L3ROcc.dataset.intern_nav_adapter import InternNavSequenceLoader
+from L3ROcc.generater.intern_vln_env import InternNavDataGenerator
 from L3ROcc.generater.normal_data_vln_env import SimpleVideoDataGenerator
 from L3ROcc.utils import load_images_as_tensor
+
+
+def _load_intrinsics_from_json(json_path):
+    """Read a 3x3 ``head_camera_intrinsic`` from an info.json. Returns None on failure.
+
+    与 tools/run_intern_nav_occ.py 中的同名函数保持一致:空串/非 .json/不存在/读取失败 均返回 None。
+    """
+    if (
+        not json_path
+        or not os.path.isfile(json_path)
+        or not json_path.endswith(".json")
+    ):
+        return None
+    try:
+        with open(json_path, "r", encoding="utf-8") as f_intr:
+            data = json.load(f_intr)
+        return np.array(data["head_camera_intrinsic"], dtype=np.float32)
+    except Exception as e:
+        print(f"[Warning] Failed to read intrinsic JSON {json_path}: {e}")
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -133,31 +155,41 @@ def load_gt_camera_positions(parquet_path, info_json_path, interval, n_keep):
     为(下采样后的)各帧构建真值相机中心轨迹。
 
     observation.state 共 14 维：x,y,z, vx,vy,vz, q_w,q_x,q_y,q_z, roll,pitch,yaw,yaw_speed
-    相机刚性安装在机器人上：X_robot = R_c2g @ X_cam + t_c2g，
-    因此相机中心在世界系下 = R_world_robot @ t_c2g + p_robot。
+    其中 state[0:3] 是机器人身体中心 (Unitree sportmodestate.position) 在 odom/world 系下的坐标,
+    state[6:10] = (q_w, q_x, q_y, q_z) 是身体在世界系下的姿态。
+
+    相机刚性挂在身体上,身体系下偏移由手眼标定给出 (lerobot_data_builder 写入键
+    `t_cam2gripper`,"gripper" 沿用 OpenCV calibrateHandEye 的命名习惯,在四足/移动机器人
+    语境下就是身体中心)。世界系相机中心 = R_world_body @ t_cam2gripper + p_body。
 
     返回：
-        cam_pos   : (n_keep, 3) 下采样各帧的真值相机中心
-        grip_pos  : (n_keep, 3) 真值机器人中心(忽略连接结构，用于对照检查)
+        cam_pos  : (n_keep, 3) 下采样各帧的真值相机中心 (已应用 hand-eye)
+        body_pos : (n_keep, 3) 下采样各帧的身体中心 (用作对照,等于 cam_pos 仅当 t_cam2gripper=0)
     """
     df = pd.read_parquet(parquet_path)
     state = np.stack(df["observation.state"].values).astype(np.float64)  # (T, 14)
-    grip_pos_full = state[:, 0:3]
+    body_pos_full = state[:, 0:3]
     quat_full = state[:, 6:10]  # (w, x, y, z)
 
-    # 手眼标定：从 info.json 取 t_cam2robot(相机原点在机器人坐标系中的位置)。
+    # 手眼标定:优先 t_cam2gripper (lerobot_data_builder 实际写入的键名),
+    # 回退到 t_cam2robot (历史命名,目前 vln_real_data 没有任何 rosbag 写这个键)。
     with open(info_json_path, "r", encoding="utf-8") as f:
         info = json.load(f)
     ext = info.get("head_camera_extrinsic", {})
-    t_c2g = np.asarray(ext.get("t_cam2robot", [[0.0], [0.0], [0.0]]), dtype=np.float64).reshape(3)
+    t_raw = ext.get("t_cam2gripper", ext.get("t_cam2robot", None))
+    if t_raw is None:
+        print(f"[warn] {info_json_path} 中缺少 head_camera_extrinsic.t_cam2gripper/t_cam2robot,"
+              f"GT 将退化为身体中心轨迹。")
+        t_raw = [[0.0], [0.0], [0.0]]
+    t_cam2body = np.asarray(t_raw, dtype=np.float64).reshape(3)
 
-    R_wg = quat_wxyz_to_R(quat_full)                       # (T, 3, 3)
-    cam_pos_full = np.einsum("tij,j->ti", R_wg, t_c2g) + grip_pos_full  # (T, 3)
+    R_wb = quat_wxyz_to_R(quat_full)                                       # (T, 3, 3)
+    cam_pos_full = np.einsum("tij,j->ti", R_wb, t_cam2body) + body_pos_full  # (T, 3)
 
     # 用与 RGB 帧相同的 interval 做下采样，再截断到 n_keep。
     cam_pos = cam_pos_full[0::interval][:n_keep]
-    grip_pos = grip_pos_full[0::interval][:n_keep]
-    return cam_pos, grip_pos
+    body_pos = body_pos_full[0::interval][:n_keep]
+    return cam_pos, body_pos
 
 
 # --------------------------------------------------------------------------------------
@@ -246,7 +278,7 @@ def render(out_dir, mode):
 
 
 # --------------------------------------------------------------------------------------
-# episode / rosbag 发现
+# 任务发现:两种 engine 各自的 (rb, episode, out_dir, label) 列表构建
 # --------------------------------------------------------------------------------------
 def discover_episodes(rb):
     """返回某个 rosbag 目录下所有 episode 名(按 RGB 视频名)。"""
@@ -257,18 +289,75 @@ def discover_episodes(rb):
 
 
 def discover_rosbags(root):
-    """返回 input_root 下所有 rosbag_* 子目录。"""
+    """返回 root 下所有 rosbag_* 子目录。"""
     if not os.path.isdir(root):
         return []
     return sorted(os.path.join(root, d) for d in os.listdir(root)
                   if d.startswith("rosbag_") and os.path.isdir(os.path.join(root, d)))
 
 
+def _is_lerobot_rosbag(p):
+    """单 rosbag 单元的判据:含 videos/chunk-000/observation.images.RGB 目录。"""
+    return os.path.isdir(os.path.join(p, "videos", "chunk-000", "observation.images.RGB"))
+
+
+def _build_jobs_normal(dataset_root, out_dir, target_episode):
+    """run_normal_data_occ.py 风格的任务发现:仅识别 lerobot rosbag。
+
+    若 dataset_root 自身即一个 rosbag,走单 rosbag 模式;否则当多 rosbag 父目录,
+    遍历其下 rosbag_*。每个 rosbag 用 discover_episodes 列出 episode。
+    返回 [(rb, ep, odir, label), ...]。
+    """
+    jobs = []
+    if _is_lerobot_rosbag(dataset_root):
+        rb = dataset_root
+        eps = discover_episodes(rb) if target_episode == "all" else [target_episode]
+        for ep in eps:
+            jobs.append((rb, ep, os.path.join(out_dir, ep), ep))
+    else:
+        for rb in discover_rosbags(dataset_root):
+            eps = discover_episodes(rb) if target_episode == "all" else [target_episode]
+            for ep in eps:
+                name = os.path.basename(rb.rstrip("/\\"))
+                jobs.append((rb, ep, os.path.join(out_dir, name, ep), f"{name}__{ep}"))
+    return jobs
+
+
+def _build_jobs_intern_nav(dataset_root, out_dir, target_episode):
+    """run_intern_nav_occ.py 风格的任务发现:用 InternNavSequenceLoader 统一识别
+    单 rosbag / 多 rosbag 父目录 / InternData-N1 三种布局。返回 [(rb, ep, odir, label), ...]。
+    若 loader 无任何轨迹,返回 None(由调用方报错)。
+    """
+    loader = InternNavSequenceLoader(dataset_root)
+    if len(loader) == 0:
+        return None
+    jobs = []
+    for i in range(len(loader)):
+        rb = loader.trajectory_dirs[i]
+        video_path = loader.trajectory_video_paths[i]
+        ep = os.path.splitext(os.path.basename(video_path))[0]
+        if target_episode != "all" and ep != target_episode:
+            continue
+        rb_name = os.path.basename(rb.rstrip("/\\"))
+        # 单 unit (rb 本身就是 dataset_root) 时,不再额外加一级 rb_name 子目录,保持与旧 --rosbag_dir 行为一致。
+        if os.path.abspath(rb) == os.path.abspath(dataset_root):
+            odir = os.path.join(out_dir, ep)
+            label = ep
+        else:
+            odir = os.path.join(out_dir, rb_name, ep)
+            label = f"{rb_name}__{ep}"
+        jobs.append((rb, ep, odir, label))
+    return jobs
+
+
 # --------------------------------------------------------------------------------------
 # 单 episode 处理(复用已加载的 gen，模型只加载一次)
 # --------------------------------------------------------------------------------------
-def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
-    """处理一个 episode：两次推理 + 计算指标 + 存盘(+可选出图)。返回指标 dict M 或 None。"""
+def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrinsics_np=None):
+    """处理一个 episode：两次推理 + 计算指标 + 存盘(+可选出图)。返回指标 dict M 或 None。
+
+    cli_intrinsics_np: 若非 None,作为最高优先级 K 覆盖该 rosbag 自身的 meta/info.json。
+    """
     rgb_path = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB", f"{episode}.mp4")
     depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mkv")
     if not os.path.exists(depth_path):
@@ -283,8 +372,13 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
 
     os.makedirs(out_dir, exist_ok=True)
 
-    with open(info_json_path, "r", encoding="utf-8") as f:
-        intr_np = np.array(json.load(f)["head_camera_intrinsic"], dtype=np.float32)
+    # 内参优先级:CLI --condit_intr_path JSON > 当前 rosbag 自身的 meta/info.json head_camera_intrinsic。
+    if cli_intrinsics_np is not None:
+        intr_np = cli_intrinsics_np
+        print(f"[{label}] 使用 CLI --condit_intr_path 的内参 (覆盖 {os.path.basename(rb)} 自身 info.json)。")
+    else:
+        with open(info_json_path, "r", encoding="utf-8") as f:
+            intr_np = np.array(json.load(f)["head_camera_intrinsic"], dtype=np.float32)
 
     interval = gen.interval
     imgs, traj_len, conditions = load_images_as_tensor(
@@ -314,9 +408,9 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
     print("[run] Pi3X RGB + intrinsic + depth ...")
     dc = run_pi3x(gen, imgs, conditions=conditions)
 
-    gt_cam, gt_grip = load_gt_camera_positions(parquet_path, info_json_path, interval, N)
+    gt_cam, gt_body = load_gt_camera_positions(parquet_path, info_json_path, interval, N)
     n = min(N, len(gt_cam))
-    gt_cam, gt_grip = gt_cam[:n], gt_grip[:n]
+    gt_cam, gt_body = gt_cam[:n], gt_body[:n]
     rgb_pos = rgb["cam_pos"][:n]
     intr_pos = intr["cam_pos"][:n]
     dc_pos = dc["cam_pos"][:n]
@@ -374,7 +468,7 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots):
         "c_gt_int": float(c_gt_int),
         "c_gt_dc": float(c_gt_dc),
         "L_gt": L_gt,
-        "L_gt_robot": path_length(gt_grip),
+        "L_gt_robot": path_length(gt_body),  # 字段名沿用旧 schema; 实际语义是身体中心轨迹长度 (Unitree body frame)
         "L_model": L_model,
         "L_model_int": L_model_int,
         "L_model_dc": L_model_dc,
@@ -480,15 +574,30 @@ def write_summary(results, out_root):
 # --------------------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="对比 Pi3X 的“模型预测尺度”与“深度推算尺度”。")
+    # 新的统一入口:由 InternNavSequenceLoader 自动识别单 rosbag / 多 rosbag 父目录 / InternData-N1。
+    ap.add_argument("--dataset_root", type=str, default="",
+                    help="数据集根目录。可直接指向单个 rosbag、含多个 rosbag_* 的父目录,"
+                         "或 InternData-N1 嵌套布局。未指定时回落到 --input_root 或 --rosbag_dir。")
+    # 向后兼容别名:沿用旧脚本/CI 的调用方式;若未给 --dataset_root,这两个等价于它。
     ap.add_argument("--rosbag_dir", type=str,
                     default=r"G:/vln_real_data/lerobot_data/20260601/rosbag_20260529_155555",
-                    help="单个 rosbag 目录(未给 --input_root 时使用)。") # 该rosbag目录已经过lerobot_data_builder.py预处理
+                    help="[deprecated alias] 单个 rosbag 目录;等价于 --dataset_root。") # 该rosbag目录已经过lerobot_data_builder.py预处理
     ap.add_argument("--input_root", type=str, default="",
-                    help="可选：包含多个 rosbag_* 的根目录，遍历其下所有 rosbag。")
-    ap.add_argument("--episode", type=str, default="episode_001",
-                    help="episode 名；用 'all' 处理该 rosbag 下全部 episode。")
+                    help="[deprecated alias] 含多个 rosbag_* 的根目录;等价于 --dataset_root。")
+    ap.add_argument("--episode", type=str, default="episode_000",
+                    help="episode 名;用 'all' 处理 dataset_root 下全部 episode。")
     ap.add_argument("--out_dir", type=str,
                     default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "exp_out","20260604"))
+    ap.add_argument("--condit_intr_path", type=str, default="",
+                    help="可选:CLI JSON 内参(含 head_camera_intrinsic),覆盖各 trajectory 自身的 meta/info.json。"
+                         "与 tools/run_intern_nav_occ.py 的同名参数语义一致。")
+    ap.add_argument("--engine", type=str, default="intern_nav",
+                    choices=["normal", "intern_nav"],
+                    help="数据处理流程选择:"
+                         "'intern_nav' 走 tools/run_intern_nav_occ.py 风格 (InternNavSequenceLoader + "
+                         "InternNavDataGenerator),识别单/多 rosbag 与 InternData-N1;"
+                         "'normal' 走 tools/run_normal_data_occ.py 风格 (手写 rosbag 发现 + "
+                         "SimpleVideoDataGenerator),仅识别 lerobot rosbag。")
     ap.add_argument("--conf_thr", type=float, default=0.1, help="像素有效所需的 Pi3X 最小置信度")
     ap.add_argument("--dmin", type=float, default=0.25, help="可信传感器深度下限(米)")
     ap.add_argument("--dmax", type=float, default=6.0, help="可信传感器深度上限(米)")
@@ -502,28 +611,35 @@ def main():
                     help="送入 Pi3X 的每帧最大像素数。CPU 运行时调小(如 120000)可加速。")
     args = ap.parse_args()
 
-    # 构建任务列表：(rosbag 目录, episode, 输出子目录, 标签)
-    jobs = []
-    if args.input_root:
-        rosbags = discover_rosbags(args.input_root)
-        if not rosbags:
-            print(f"[error] --input_root 下未找到 rosbag_* 目录: {args.input_root}")
+    # 解析数据根目录:--dataset_root > --input_root > --rosbag_dir。
+    dataset_root = args.dataset_root or args.input_root or args.rosbag_dir
+    if not dataset_root:
+        print("[error] 未指定数据集根目录。请提供 --dataset_root / --input_root / --rosbag_dir 之一。")
+        return
+    if not os.path.isdir(dataset_root):
+        print(f"[error] 数据集根目录不存在: {dataset_root}")
+        return
+
+    # CLI 内参覆盖(对所有 episode 生效);留空则在 process_episode 内读各自的 meta/info.json。
+    cli_intrinsics_np = _load_intrinsics_from_json(args.condit_intr_path)
+    if args.condit_intr_path and cli_intrinsics_np is None:
+        print(f"[Warning] --condit_intr_path 提供但不可加载;将回退到每个 trajectory 自身的 meta/info.json: "
+              f"{args.condit_intr_path}")
+
+    # 按 engine 选择数据发现策略。
+    if args.engine == "intern_nav":
+        jobs = _build_jobs_intern_nav(dataset_root, args.out_dir, args.episode)
+        if jobs is None:
+            print(f"[error] InternNavSequenceLoader 在 {dataset_root} 下未发现有效轨迹。")
             return
-        for rb in rosbags:
-            eps = discover_episodes(rb) if args.episode == "all" else [args.episode]
-            for ep in eps:
-                name = os.path.basename(rb.rstrip("/\\"))
-                jobs.append((rb, ep, os.path.join(args.out_dir, name, ep), f"{name}__{ep}"))
-    else:
-        rb = args.rosbag_dir
-        eps = discover_episodes(rb) if args.episode == "all" else [args.episode]
-        for ep in eps:
-            jobs.append((rb, ep, os.path.join(args.out_dir, ep), ep))
+    else:  # normal
+        jobs = _build_jobs_normal(dataset_root, args.out_dir, args.episode)
 
     if not jobs:
-        print("[error] 未发现任何 episode。检查 --rosbag_dir / --input_root / --episode。")
+        print(f"[error] engine={args.engine} 下未发现 episode='{args.episode}'。"
+              f"用 --episode all 处理全部,或检查路径/名称。")
         return
-    print(f"[plan] 共 {len(jobs)} 个 episode 待处理。")
+    print(f"[plan] 共 {len(jobs)} 个 episode 待处理 (engine={args.engine})。")
 
     # 单集默认出逐集图；批量默认只出汇总图(除非 --per_episode_plots)。
     do_plots = args.per_episode_plots or (len(jobs) == 1)
@@ -532,18 +648,20 @@ def main():
     config_path = os.path.join(_PROJECT_ROOT, "L3ROcc", "configs", "config.yaml")
     model_dir = os.path.join(_PROJECT_ROOT, "ckpt")
     os.makedirs(args.out_dir, exist_ok=True)
-    gen = SimpleVideoDataGenerator(config_path, args.out_dir, model_dir, model_type="pi3x")
+    gen_cls = InternNavDataGenerator if args.engine == "intern_nav" else SimpleVideoDataGenerator
+    gen = gen_cls(config_path, args.out_dir, model_dir, model_type="pi3x")
     # Windows 预加载的 state dict 已被 load_state_dict 复制进模型，释放它(~5.4GB)给推理腾内存。
     if sys.platform == "win32":
         globals().pop("_PI3X_SD", None)
         import gc
         gc.collect()
-    print(f"[cfg] interval={gen.interval}  device={gen.device}  amp={gen.amp_dtype}")
+    print(f"[cfg] engine={args.engine}  generator={gen_cls.__name__}  "
+          f"interval={gen.interval}  device={gen.device}  amp={gen.amp_dtype}")
 
     results = []
     for rb, ep, odir, label in jobs:
         try:
-            M = process_episode(gen, rb, ep, odir, label, args, do_plots)
+            M = process_episode(gen, rb, ep, odir, label, args, do_plots, cli_intrinsics_np)
         except Exception as e:
             import traceback
             print(f"[skip] {label}: {e}")

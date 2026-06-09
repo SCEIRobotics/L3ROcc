@@ -42,7 +42,7 @@
 | `videos/chunk-000/observation.images.RGB/<ep>.mp4` | RGB 视频 | Pi3X 输入 |
 | `videos/chunk-000/observation.images.depth/<ep>.mkv` | gray16le 公制深度(mm) | `model_dc` 的深度条件 / 诊断量 `s_depth_*` |
 | `data/chunk-000/<ep>.parquet` → `observation.state` | 里程计位姿(x,y,z + 四元数…) | **真值轨迹** |
-| `meta/info.json` | `head_camera_intrinsic`、`head_camera_extrinsic.t_cam2robot` | 标定内参 / 手眼标定 |
+| `meta/info.json` | `head_camera_intrinsic`、`head_camera_extrinsic.t_cam2gripper` | 标定内参 / 手眼标定(`gripper` 沿用 OpenCV calibrateHandEye 命名,在四足/移动机器人语境下即身体中心;脚本回退兼容旧名 `t_cam2robot`) |
 
 `observation.state` 共 14 维：`x,y,z, vx,vy,vz, q_w,q_x,q_y,q_z, roll,pitch,yaw,yaw_speed`
 
@@ -148,12 +148,12 @@ s_depth_<v>      = median(D_sensor / D_pred_<v>)      # 诊断:模型深度 vs �
 
 ```python
 # load_gt_camera_positions()
-p_robot = state[:, 0:3]                 # 机器本体世界坐标 x,y,z
-quat      = state[:, 6:10]                # 四元数(w,x,y,z) → R_world_robot
-t_c2g     = info.json["...t_cam2robot"] # 相机原点在机器本体坐标系下的位置(手眼标定)
+p_body    = state[:, 0:3]                  # 身体中心世界坐标 x,y,z (Unitree sportmodestate.position)
+quat      = state[:, 6:10]                 # 四元数(w,x,y,z) → R_world_body
+t_c2b     = info.json["head_camera_extrinsic.t_cam2gripper"]  # 身体系下相机原点 (手眼标定; 兼容旧名 t_cam2robot)
 
-# 机器本体轨迹 → 相机中心轨迹:
-cam_pos = R_world_robot @ t_c2g + p_robot
+# 身体中心轨迹 → 相机中心轨迹:
+cam_pos = R_world_body @ t_c2b + p_body
 
 # GT距离 = 相机中心折线总长:
 L_gt = Σ ‖cam_pos[i+1] − cam_pos[i]‖      # path_length()
@@ -231,8 +231,8 @@ python tools/exp_scale/exp_scale_compare.py --episode episode_000 --cpu --pixel_
 |---|---|
 | `L_gt` / `L_gt_robot` | 真值相机 / 机器本体轨迹长度(米) |
 | `L_model` / `L_model_int` / `L_model_dc` | 三变体的轨迹长度 |
-| `metric_rgb` / `metric_int` / `metric_dc` | 三变体的 Pi3X metric 头标量 |
-| `c_gt_rgb` / `c_gt_int` / `c_gt_dc` | 三变体各自 Umeyama 理想尺度 |
+| `metric_rgb` / `metric_int` / `metric_dc` | 三变体的 Pi3X metric 头标量，表示：是网络"自我标定到米"的乘数;它学多大都行,只要乘完之后的结果对齐 GT 即可。|
+| `c_gt_rgb` / `c_gt_int` / `c_gt_dc` | 三变体各自 Umeyama 理想尺度，表示：是"网络声称的米"距离"真实的米"还差多少倍。|
 | `s_depth_rgb` / `s_depth_int` / `s_depth_dc` | 三变体预测深度 vs 传感器深度的全局中位比(诊断) |
 | `e_model` / `e_model_int` / `e_model_dc` | 三变体的轨迹长度相对误差(**主评分**) |
 | `scale_err_model` / `scale_err_model_int` / `scale_err_model_dc` | 纯尺度误差(metric c=1 vs `c_gt_*`) |

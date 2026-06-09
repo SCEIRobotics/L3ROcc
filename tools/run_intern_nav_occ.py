@@ -99,14 +99,17 @@ def run_dataset_pipeline(args):
         model_type=args.model_type,
     )
 
-    # Optional external intrinsic JSON (overrides parquet K when present)
+    # Optional external intrinsic JSON (overrides the loader-resolved K when present;
+    # loader K comes from parquet observation.camera_intrinsic or, as fallback,
+    # per-trajectory meta/info.json head_camera_intrinsic — lerobot v2.1 only has the latter)
     cli_intrinsics_np = (
         _load_intrinsics_from_json(args.condit_intr_path) if use_intrinsic else None
     )
     if use_intrinsic and args.condit_intr_path and cli_intrinsics_np is None:
         print(
             f"[Warning] --condit_intr_path provided but not loadable; "
-            f"will fall back to parquet intrinsic if available."
+            f"will fall back to the loader-resolved intrinsic "
+            f"(parquet observation.camera_intrinsic or meta/info.json head_camera_intrinsic) if available."
         )
 
     # ================= 3. Start Processing Loop =================
@@ -161,7 +164,8 @@ def run_dataset_pipeline(args):
                         f"under trajectory; proceeding without depth conditioning."
                     )
 
-            # Intrinsic priority: CLI JSON override > parquet > None (DLT fallback)
+            # Intrinsic priority: CLI JSON override > loader (parquet observation.camera_intrinsic,
+            # else meta/info.json head_camera_intrinsic) > None (DLT fallback)
             intrinsics_np = None
             if use_intrinsic:
                 if cli_intrinsics_np is not None:
@@ -238,10 +242,12 @@ if __name__ == "__main__":
         type=_parse_bool,
         default=True,
         metavar="true|false",
-        help="Use a calibrated K. When true: (1) parquet's "
-        "observation.camera_intrinsic is loaded automatically, "
-        "(2) --condit_intr_path (if given) overrides the parquet value, "
-        "(3) the rescaled K replaces the DLT-estimated K in the saved Parquet, "
+        help="Use a calibrated K. When true: (1) the loader reads K from parquet's "
+        "observation.camera_intrinsic if present, otherwise falls back to the "
+        "per-trajectory meta/info.json 'head_camera_intrinsic' "
+        "(lerobot v2.1 data does NOT write K to parquet, so only the info.json path applies), "
+        "(2) --condit_intr_path (if given) overrides the loaded value for all trajectories, "
+        "(3) the rescaled K replaces the DLT-estimated K in the saved output Parquet, "
         "(4) the K is also fed to Pi3X as conditioning when model_type='pi3x'.",
     )
     parser.add_argument(
@@ -249,7 +255,7 @@ if __name__ == "__main__":
         type=str,
         default="",
         help="Optional info.json path with 'head_camera_intrinsic'. When set, overrides "
-        "the per-trajectory parquet intrinsic for ALL trajectories.",
+        "the per-trajectory loaded intrinsic (parquet or meta/info.json) for ALL trajectories.",
     )
 
     # ---------- Output options ----------
