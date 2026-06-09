@@ -93,10 +93,39 @@ def _load_intrinsics_from_json(json_path):
     try:
         with open(json_path, "r", encoding="utf-8") as f_intr:
             data = json.load(f_intr)
+        if "head_camera_intrinsic" not in data:
+            return None
         return np.array(data["head_camera_intrinsic"], dtype=np.float32)
     except Exception as e:
         print(f"[Warning] Failed to read intrinsic JSON {json_path}: {e}")
         return None
+
+
+def _load_intrinsics_from_parquet(parquet_path):
+    """Read a 3x3 K from a parquet's ``observation.camera_intrinsic`` column (first row).
+
+    InternData-N1 在每个 trajectory 的 parquet 中写入了 ``observation.camera_intrinsic``;
+    其 meta/info.json 不再含 ``head_camera_intrinsic``。该列可能是 (3,3) 矩阵、长度 9
+    的展开,或 3 个长度 3 的子列表 —— 任意一种都还原成 (3,3) np.float32;无法还原返回 None。
+    """
+    if not parquet_path or not os.path.isfile(parquet_path):
+        return None
+    try:
+        df = pd.read_parquet(parquet_path, columns=["observation.camera_intrinsic"])
+    except Exception:
+        return None
+    if "observation.camera_intrinsic" not in df.columns or len(df) == 0:
+        return None
+    raw = df["observation.camera_intrinsic"].tolist()[0]
+    try:
+        arr = np.asarray(raw, dtype=np.float32)
+    except Exception:
+        return None
+    if arr.shape == (3, 3):
+        return arr
+    if arr.size == 9:
+        return arr.reshape(3, 3)
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -152,39 +181,62 @@ def umeyama_scale(source, target):
 # --------------------------------------------------------------------------------------
 def load_gt_camera_positions(parquet_path, info_json_path, interval, n_keep):
     """
-    为(下采样后的)各帧构建真值相机中心轨迹。
+    为(下采样后的)各帧构建真值相机中心轨迹。支持两种 parquet schema:
 
-    observation.state 共 14 维：x,y,z, vx,vy,vz, q_w,q_x,q_y,q_z, roll,pitch,yaw,yaw_speed
-    其中 state[0:3] 是机器人身体中心 (Unitree sportmodestate.position) 在 odom/world 系下的坐标,
-    state[6:10] = (q_w, q_x, q_y, q_z) 是身体在世界系下的姿态。
+    A. lerobot rosbag —— ``observation.state`` 列(14 维):
+       x,y,z, vx,vy,vz, q_w,q_x,q_y,q_z, roll,pitch,yaw,yaw_speed;state[0:3] 是身体中心,
+       state[6:10] 是身体姿态。相机挂在身体上,身体系下偏移由 info.json 的
+       ``head_camera_extrinsic.t_cam2gripper`` 给出(回退键 ``t_cam2robot``)。
+       世界系相机中心 = R_world_body @ t_cam2gripper + p_body。
+       info.json 缺失或缺该键时 GT 退化为身体中心轨迹(同语义旧分支)。
 
-    相机刚性挂在身体上,身体系下偏移由手眼标定给出 (lerobot_data_builder 写入键
-    `t_cam2gripper`,"gripper" 沿用 OpenCV calibrateHandEye 的命名习惯,在四足/移动机器人
-    语境下就是身体中心)。世界系相机中心 = R_world_body @ t_cam2gripper + p_body。
+    B. InternData-N1 —— ``action`` 列(每行 4x4 SE(3) 矩阵,直接给出相机在世界系的位姿):
+       平移列即相机轨迹;无独立身体中心,body_pos 取 cam_pos 同值(汇总 L_gt_robot 沿用旧字段名)。
 
     返回：
-        cam_pos  : (n_keep, 3) 下采样各帧的真值相机中心 (已应用 hand-eye)
-        body_pos : (n_keep, 3) 下采样各帧的身体中心 (用作对照,等于 cam_pos 仅当 t_cam2gripper=0)
+        cam_pos  : (n_keep, 3) 下采样各帧的真值相机中心
+        body_pos : (n_keep, 3) 下采样各帧的身体中心 (N1 上等于 cam_pos)
     """
     df = pd.read_parquet(parquet_path)
-    state = np.stack(df["observation.state"].values).astype(np.float64)  # (T, 14)
-    body_pos_full = state[:, 0:3]
-    quat_full = state[:, 6:10]  # (w, x, y, z)
 
-    # 手眼标定:优先 t_cam2gripper (lerobot_data_builder 实际写入的键名),
-    # 回退到 t_cam2robot (历史命名,目前 vln_real_data 没有任何 rosbag 写这个键)。
-    with open(info_json_path, "r", encoding="utf-8") as f:
-        info = json.load(f)
-    ext = info.get("head_camera_extrinsic", {})
-    t_raw = ext.get("t_cam2gripper", ext.get("t_cam2robot", None))
-    if t_raw is None:
-        print(f"[warn] {info_json_path} 中缺少 head_camera_extrinsic.t_cam2gripper/t_cam2robot,"
-              f"GT 将退化为身体中心轨迹。")
-        t_raw = [[0.0], [0.0], [0.0]]
-    t_cam2body = np.asarray(t_raw, dtype=np.float64).reshape(3)
+    if "observation.state" in df.columns:
+        state = np.stack(df["observation.state"].values).astype(np.float64)  # (T, 14)
+        body_pos_full = state[:, 0:3]
+        quat_full = state[:, 6:10]  # (w, x, y, z)
 
-    R_wb = quat_wxyz_to_R(quat_full)                                       # (T, 3, 3)
-    cam_pos_full = np.einsum("tij,j->ti", R_wb, t_cam2body) + body_pos_full  # (T, 3)
+        # 手眼标定:优先 t_cam2gripper (lerobot_data_builder 实际写入的键名),
+        # 回退到 t_cam2robot (历史命名,目前 vln_real_data 没有任何 rosbag 写这个键)。
+        info = {}
+        if info_json_path and os.path.isfile(info_json_path):
+            with open(info_json_path, "r", encoding="utf-8") as f:
+                info = json.load(f)
+        ext = info.get("head_camera_extrinsic", {})
+        t_raw = ext.get("t_cam2gripper", ext.get("t_cam2robot", None))
+        if t_raw is None:
+            print(f"[warn] {info_json_path} 中缺少 head_camera_extrinsic.t_cam2gripper/t_cam2robot"
+                  f" (或文件不存在),GT 将退化为身体中心轨迹。")
+            t_raw = [[0.0], [0.0], [0.0]]
+        t_cam2body = np.asarray(t_raw, dtype=np.float64).reshape(3)
+
+        R_wb = quat_wxyz_to_R(quat_full)                                       # (T, 3, 3)
+        cam_pos_full = np.einsum("tij,j->ti", R_wb, t_cam2body) + body_pos_full  # (T, 3)
+    elif "action" in df.columns:
+        # InternData-N1: action 每行是 4x4 SE(3),取平移列作相机轨迹。
+        actions = np.stack([
+            np.asarray(a.tolist() if hasattr(a, "tolist") else a, dtype=np.float64)
+            for a in df["action"].values
+        ])  # (T, 4, 4)
+        if actions.ndim != 3 or actions.shape[-2:] != (4, 4):
+            raise KeyError(
+                f"parquet {parquet_path} 的 action 列形状非 (T,4,4):{actions.shape}"
+            )
+        cam_pos_full = actions[:, :3, 3]
+        body_pos_full = cam_pos_full.copy()
+    else:
+        raise KeyError(
+            f"parquet {parquet_path} 既无 observation.state (lerobot rosbag),"
+            f"也无 action (InternData-N1) —— 无法构建 GT 轨迹"
+        )
 
     # 用与 RGB 帧相同的 interval 做下采样，再截断到 n_keep。
     cam_pos = cam_pos_full[0::interval][:n_keep]
@@ -380,7 +432,10 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
     # depth_path 可能为 None: loader 没在该 unit 找到深度视频。校验时跳过 None;
     # 后续 load_images_as_tensor 会拿到 None/空串,conditions["depths"] 自然为 None,
     # 再由下面的 "[skip] ... 传感器深度加载失败" 分支正常退出。
-    for p in [rgb_path, depth_path, parquet_path, info_json_path]:
+    # info_json_path 也允许不存在: InternData-N1 单元可能没有 meta/info.json,
+    # 此时内参从 parquet 取(见下方解析),外参 (load_gt_camera_positions) 自然取不到 —
+    # 那一步只在确实使用 GT 的代码路径里才报错,这里不预先拦截。
+    for p in [rgb_path, depth_path, parquet_path]:
         if p is None:
             continue
         if not os.path.exists(p):
@@ -389,13 +444,24 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
 
     os.makedirs(out_dir, exist_ok=True)
 
-    # 内参优先级:CLI --condit_intr_path JSON > 当前 rosbag 自身的 meta/info.json head_camera_intrinsic。
+    # 内参优先级:
+    #   CLI --condit_intr_path JSON
+    #   > 当前 trajectory parquet 的 observation.camera_intrinsic 列(InternData-N1 写在这里)
+    #   > 当前 rosbag 自身 meta/info.json 的 head_camera_intrinsic (lerobot rosbag 路径)
+    #   > None — 让 Pi3X 自己反算 K (三变体中 int/dc 退化为无 K 条件,等价于 RGB-only)
     if cli_intrinsics_np is not None:
         intr_np = cli_intrinsics_np
-        print(f"[{label}] 使用 CLI --condit_intr_path 的内参 (覆盖 {os.path.basename(rb)} 自身 info.json)。")
+        print(f"[{label}] 使用 CLI --condit_intr_path 的内参 (覆盖 {os.path.basename(rb)} 自身)。")
     else:
-        with open(info_json_path, "r", encoding="utf-8") as f:
-            intr_np = np.array(json.load(f)["head_camera_intrinsic"], dtype=np.float32)
+        intr_np = _load_intrinsics_from_parquet(parquet_path)
+        if intr_np is not None:
+            print(f"[{label}] 使用 parquet observation.camera_intrinsic 内参。")
+        else:
+            intr_np = _load_intrinsics_from_json(info_json_path)
+            if intr_np is not None:
+                print(f"[{label}] 使用 meta/info.json head_camera_intrinsic 内参。")
+            else:
+                print(f"[{label}] 未找到内参 (CLI/parquet/info.json 均无),由 Pi3X 自行反算。")
 
     interval = gen.interval
     imgs, traj_len, conditions = load_images_as_tensor(
