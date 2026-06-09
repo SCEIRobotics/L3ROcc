@@ -306,26 +306,30 @@ def _build_jobs_normal(dataset_root, out_dir, target_episode):
 
     若 dataset_root 自身即一个 rosbag,走单 rosbag 模式;否则当多 rosbag 父目录,
     遍历其下 rosbag_*。每个 rosbag 用 discover_episodes 列出 episode。
-    返回 [(rb, ep, odir, label), ...]。
+    返回 [(rb, ep, odir, label, rgb_path, depth_path), ...]。
+    末两项固定为 None —— normal 引擎让 process_episode 按 lerobot 约定自行拼路径。
     """
     jobs = []
     if _is_lerobot_rosbag(dataset_root):
         rb = dataset_root
         eps = discover_episodes(rb) if target_episode == "all" else [target_episode]
         for ep in eps:
-            jobs.append((rb, ep, os.path.join(out_dir, ep), ep))
+            jobs.append((rb, ep, os.path.join(out_dir, ep), ep, None, None))
     else:
         for rb in discover_rosbags(dataset_root):
             eps = discover_episodes(rb) if target_episode == "all" else [target_episode]
             for ep in eps:
                 name = os.path.basename(rb.rstrip("/\\"))
-                jobs.append((rb, ep, os.path.join(out_dir, name, ep), f"{name}__{ep}"))
+                jobs.append((rb, ep, os.path.join(out_dir, name, ep), f"{name}__{ep}", None, None))
     return jobs
 
 
 def _build_jobs_intern_nav(dataset_root, out_dir, target_episode):
     """run_intern_nav_occ.py 风格的任务发现:用 InternNavSequenceLoader 统一识别
-    单 rosbag / 多 rosbag 父目录 / InternData-N1 三种布局。返回 [(rb, ep, odir, label), ...]。
+    单 rosbag / 多 rosbag 父目录 / InternData-N1 三种布局。
+    返回 [(rb, ep, odir, label, rgb_path, depth_path), ...];loader 已解析好的
+    RGB/深度路径直接随 job 携带,避免下游按 lerobot 约定硬拼路径而漏认 N1 的
+    observation.video.trajectory / observation.video.depth。
     若 loader 无任何轨迹,返回 None(由调用方报错)。
     """
     loader = InternNavSequenceLoader(dataset_root)
@@ -335,6 +339,7 @@ def _build_jobs_intern_nav(dataset_root, out_dir, target_episode):
     for i in range(len(loader)):
         rb = loader.trajectory_dirs[i]
         video_path = loader.trajectory_video_paths[i]
+        depth_path = loader.trajectory_depth_paths[i]  # 可能为 None: 该 unit 无深度视频
         ep = os.path.splitext(os.path.basename(video_path))[0]
         if target_episode != "all" and ep != target_episode:
             continue
@@ -346,26 +351,38 @@ def _build_jobs_intern_nav(dataset_root, out_dir, target_episode):
         else:
             odir = os.path.join(out_dir, rb_name, ep)
             label = f"{rb_name}__{ep}"
-        jobs.append((rb, ep, odir, label))
+        jobs.append((rb, ep, odir, label, video_path, depth_path))
     return jobs
 
 
 # --------------------------------------------------------------------------------------
 # 单 episode 处理(复用已加载的 gen，模型只加载一次)
 # --------------------------------------------------------------------------------------
-def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrinsics_np=None):
+def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrinsics_np=None,
+                    rgb_path=None, depth_path=None):
     """处理一个 episode：两次推理 + 计算指标 + 存盘(+可选出图)。返回指标 dict M 或 None。
 
     cli_intrinsics_np: 若非 None,作为最高优先级 K 覆盖该 rosbag 自身的 meta/info.json。
+    rgb_path / depth_path: 调用端(通常是 intern_nav 引擎)预解析好的 RGB / 深度视频
+        路径;为 None 时按 lerobot 约定 (observation.images.RGB / observation.images.depth)
+        在该 rosbag 下硬拼路径。N1 布局 (observation.video.trajectory / .depth) 只有
+        通过 InternNavSequenceLoader 传入路径才能被识别。
     """
-    rgb_path = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB", f"{episode}.mp4")
-    depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mkv")
-    if not os.path.exists(depth_path):
-        depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mp4")
+    if rgb_path is None:
+        rgb_path = os.path.join(rb, "videos", "chunk-000", "observation.images.RGB", f"{episode}.mp4")
+    if depth_path is None:
+        depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mkv")
+        if not os.path.exists(depth_path):
+            depth_path = os.path.join(rb, "videos", "chunk-000", "observation.images.depth", f"{episode}.mp4")
     parquet_path = os.path.join(rb, "data", "chunk-000", f"{episode}.parquet")
     info_json_path = os.path.join(rb, "meta", "info.json")
 
+    # depth_path 可能为 None: loader 没在该 unit 找到深度视频。校验时跳过 None;
+    # 后续 load_images_as_tensor 会拿到 None/空串,conditions["depths"] 自然为 None,
+    # 再由下面的 "[skip] ... 传感器深度加载失败" 分支正常退出。
     for p in [rgb_path, depth_path, parquet_path, info_json_path]:
+        if p is None:
+            continue
         if not os.path.exists(p):
             print(f"[skip] {label}: 缺少文件 {p}")
             return None
@@ -659,9 +676,10 @@ def main():
           f"interval={gen.interval}  device={gen.device}  amp={gen.amp_dtype}")
 
     results = []
-    for rb, ep, odir, label in jobs:
+    for rb, ep, odir, label, rgb_path, depth_path in jobs:
         try:
-            M = process_episode(gen, rb, ep, odir, label, args, do_plots, cli_intrinsics_np)
+            M = process_episode(gen, rb, ep, odir, label, args, do_plots, cli_intrinsics_np,
+                                rgb_path=rgb_path, depth_path=depth_path)
         except Exception as e:
             import traceback
             print(f"[skip] {label}: {e}")
