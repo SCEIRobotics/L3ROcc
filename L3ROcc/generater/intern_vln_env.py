@@ -1,4 +1,5 @@
 import fcntl
+import glob
 import json
 import os
 import time
@@ -7,6 +8,25 @@ import numpy as np
 import pandas as pd
 
 from L3ROcc.base import DataGenerator
+from L3ROcc.utils import compute_similarity_transform
+
+
+def _quat_wxyz_to_R(q):
+    """(T, 4) (w, x, y, z) -> (T, 3, 3) rotation matrices. Vectorized."""
+    q = np.asarray(q, dtype=np.float64)
+    q = q / (np.linalg.norm(q, axis=-1, keepdims=True) + 1e-12)
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = np.empty(q.shape[:-1] + (3, 3), dtype=np.float64)
+    R[..., 0, 0] = 1 - 2 * (y * y + z * z)
+    R[..., 0, 1] = 2 * (x * y - z * w)
+    R[..., 0, 2] = 2 * (x * z + y * w)
+    R[..., 1, 0] = 2 * (x * y + z * w)
+    R[..., 1, 1] = 1 - 2 * (x * x + z * z)
+    R[..., 1, 2] = 2 * (y * z - x * w)
+    R[..., 2, 0] = 2 * (x * z - y * w)
+    R[..., 2, 1] = 2 * (y * z + x * w)
+    R[..., 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
 
 
 class InternNavDataGenerator(DataGenerator):
@@ -162,60 +182,142 @@ class InternNavDataGenerator(DataGenerator):
         }
         return paths
 
+    def _locate_traj_parquet(self, input_path):
+        """Locate the GT parquet file matching ``input_path``.
+
+        Tries (in order): episode_<id>.parquet under traj_root (lerobot rosbag uses
+        episode_000/001/...; InternData-N1 uses episode_000000), the same path under
+        ``self.save_path``, any glob match of ``episode_*.parquet``, finally the legacy
+        episode_000000.parquet. Returns the resolved path or None.
+        """
+        traj_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(input_path)))
+        )
+        episode_id = os.path.splitext(os.path.basename(input_path))[0]
+
+        candidates = [
+            os.path.join(traj_root, "data", "chunk-000", f"{episode_id}.parquet"),
+            os.path.join(self.save_path, "data", "chunk-000", f"{episode_id}.parquet"),
+            os.path.join(traj_root, "data", "chunk-000", "episode_000000.parquet"),
+            os.path.join(self.save_path, "data", "chunk-000", "episode_000000.parquet"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+
+        for root in (traj_root, self.save_path):
+            hits = sorted(glob.glob(os.path.join(root, "data", "chunk-000", "episode_*.parquet")))
+            if hits:
+                return hits[0]
+        return None
+
     def get_gt_poses(self, input_path):
         """
-        Parses Ground Truth (GT) camera trajectories specific to the InternNav dataset.
+        Parses Ground Truth (GT) camera trajectories. Two parquet schemas are supported:
 
-        It attempts to locate the `episode_000000.parquet` file relative to the input path
-        or the save directory to extract the 'action' column containing pose matrices.
+        A. InternData-N1: ``action`` column where each row stacks into a 4x4 SE(3) matrix —
+           used directly as the camera pose in the world frame.
 
-        Args:
-            input_path (str): Path to the input source used to locate the trajectory root.
+        B. lerobot rosbag: ``observation.state`` column (14-dim body odometry with quaternion);
+           combined with the full hand-eye calibration (rotation ``R_cam2gripper`` and
+           translation ``t_cam2gripper``) from ``meta/info.json``, the camera pose is
+           reconstructed as ``R_world_cam = R_world_body @ R_cam2gripper`` and
+           ``p_world_cam = R_world_body @ t_cam2gripper + p_body``. Including the hand-eye
+           rotation is what gives the downstream alignment enough constraint to recover the
+           camera mount tilt — without it, straight-line trajectories leave the roll/pitch
+           around the trajectory direction unconstrained.
 
         Returns:
-            np.ndarray or None:
-                - If successful, returns an array of shape (N, 4, 4) representing camera poses.
-                - If the file is missing or data is invalid, returns None.
+            np.ndarray or None: (N, 4, 4) camera poses in the GT world frame, else None.
         """
         try:
-            traj_root = os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(input_path)))
-            )
-            origin_parquet_path = os.path.join(
-                traj_root, "data", "chunk-000", "episode_000000.parquet"
-            )
+            parquet_path = self._locate_traj_parquet(input_path)
+            if parquet_path is None:
+                return None
 
-            # Fallback to save_path if original not found
-            if not os.path.exists(origin_parquet_path):
-                origin_parquet_path = os.path.join(
-                    self.save_path, "data", "chunk-000", "episode_000000.parquet"
-                )
-                if not os.path.exists(origin_parquet_path):
+            df = pd.read_parquet(parquet_path, engine="pyarrow")
+
+            # --- Schema A: InternData-N1 action column = (4, 4) SE(3) ---
+            if "action" in df.columns:
+                gt_raw = df["action"].tolist()
+                gt_poses_np = []
+                for p in gt_raw:
+                    if p is None:
+                        continue
+                    try:
+                        mat = np.stack(p)
+                    except Exception:
+                        mat = np.asarray(p)
+                    if mat.shape == (4, 4):
+                        gt_poses_np.append(mat.astype(np.float64))
+                if len(gt_poses_np) >= 1:
+                    return np.array(gt_poses_np)
+
+            # --- Schema B: lerobot rosbag observation.state (14-dim) + hand-eye ---
+            if "observation.state" in df.columns:
+                state = np.stack(df["observation.state"].values).astype(np.float64)
+                if state.ndim != 2 or state.shape[1] < 10:
                     return None
+                p_body = state[:, 0:3]
+                quat_wxyz = state[:, 6:10]
 
-            df = pd.read_parquet(origin_parquet_path, engine="pyarrow")
-            col_name = "action"
-            if col_name not in df.columns:
-                return None
+                traj_root = os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.dirname(input_path)))
+                )
+                info_json_path = os.path.join(traj_root, "meta", "info.json")
+                t_cam2body = np.zeros(3, dtype=np.float64)
+                R_cam2body = np.eye(3, dtype=np.float64)
+                if os.path.isfile(info_json_path):
+                    with open(info_json_path, "r", encoding="utf-8") as f:
+                        info = json.load(f)
+                    ext = info.get("head_camera_extrinsic", {})
+                    t_raw = ext.get("t_cam2gripper", ext.get("t_cam2robot", None))
+                    if t_raw is not None:
+                        t_cam2body = np.asarray(t_raw, dtype=np.float64).reshape(3)
+                    else:
+                        print(
+                            f"[GT] info.json missing head_camera_extrinsic.t_cam2gripper "
+                            f"({info_json_path}); GT degenerates to body-center trajectory."
+                        )
+                    R_raw = ext.get("R_cam2gripper", ext.get("R_cam2robot", None))
+                    if R_raw is not None:
+                        R_arr = np.asarray(R_raw, dtype=np.float64)
+                        if R_arr.shape == (3, 3):
+                            R_cam2body = R_arr
+                        elif R_arr.size == 9:
+                            R_cam2body = R_arr.reshape(3, 3)
+                        else:
+                            print(
+                                f"[GT] Unexpected R_cam2gripper shape {R_arr.shape}; "
+                                f"GT rotation degenerates to body orientation."
+                            )
+                    else:
+                        print(
+                            f"[GT] info.json missing head_camera_extrinsic.R_cam2gripper "
+                            f"({info_json_path}); GT rotation degenerates to body orientation. "
+                            f"Camera mount tilt cannot be recovered."
+                        )
+                else:
+                    print(
+                        f"[GT] meta/info.json not found ({info_json_path}); GT degenerates "
+                        f"to body-center trajectory."
+                    )
 
-            gt_raw = df[col_name].tolist()
-            gt_poses_np = []
+                R_wb = _quat_wxyz_to_R(quat_wxyz)
+                cam_pos = np.einsum("tij,j->ti", R_wb, t_cam2body) + p_body
+                R_world_cam = np.einsum("tij,jk->tik", R_wb, R_cam2body)
+                T = cam_pos.shape[0]
+                gt_poses = np.zeros((T, 4, 4), dtype=np.float64)
+                gt_poses[:, :3, :3] = R_world_cam
+                gt_poses[:, :3, 3] = cam_pos
+                gt_poses[:, 3, 3] = 1.0
+                return gt_poses
 
-            for p in gt_raw:
-                if p is None:
-                    continue
-
-                mat = np.stack(p)
-                gt_poses_np.append(mat)
-
-            if len(gt_poses_np) == 0:
-                return None
-
-            return np.array(gt_poses_np)
+            return None
 
         except Exception as e:
             print(f"[Subclass Error] Failed to load GT poses: {e}")
-            raise e
+            return None
 
     def compute_trajectory_scale(self, poses_gt, poses_pred):
         """
@@ -278,22 +380,35 @@ class InternNavDataGenerator(DataGenerator):
 
     def align_with_gt_scale(self, input_path, pcd):
         """
-        Attempts to align the predicted point cloud scale with Ground Truth.
-        Dependent on `get_gt_poses`.
+        Aligns the Pi3X reconstruction to the GT world frame via a two-stage Sim3 transform:
+
+        1. **Rotation** (orthogonal Procrustes on the per-frame camera rotation columns):
+           solve ``R = argmin Σ ||R · R_pred[t] - R_gt[t]||`` via SVD of
+           ``M = Σ R_gt[t] · R_pred[t]^T``. This fully constrains all 3 rotation DOF and is
+           independent of the trajectory geometry — crucial because real robot trajectories
+           are often near-collinear, which leaves the rotation around the trajectory axis
+           underdetermined when only translation columns are used.
+
+        2. **Scale + translation** (on the translation columns under the already-known R):
+           with ``pred_xyz_rot = pred_xyz @ R^T``, fit ``s, t`` so that
+           ``s · pred_xyz_rot + t ≈ gt_xyz``.
+
+        The composed (s, R, t) Sim3 is then applied in-place to ``self.pcd`` and
+        ``self.camera_pose`` so downstream consumers (``save_global_data``,
+        ``compute_sequence_data``) see already-aligned data. ``compute_sequence_data`` must
+        therefore be called with ``scale=1.0`` (otherwise the OCC voxels would be scaled
+        twice).
 
         Args:
             input_path : Path to the input data.
-            pcd : The predicted point cloud (N, 3).
+            pcd : The predicted point cloud (N, 3) in the Pi3X world frame.
 
         Returns:
             tuple:
-                - pcd : The scaled point cloud.
-                - scale : The applied scale factor.
+                - pcd_aligned : (N, 3) point cloud transformed into the GT world frame.
+                - scale       : The Sim3 scale factor applied (1.0 if alignment skipped).
         """
-        scale = 1.0
-
         try:
-            # Get GT poses from subclass
             gt_poses_np = self.get_gt_poses(input_path)
 
             if gt_poses_np is None or len(gt_poses_np) == 0:
@@ -302,12 +417,71 @@ class InternNavDataGenerator(DataGenerator):
                 )
                 return pcd, 1.0
 
-            # Calculate Scale
-            scale = self.compute_trajectory_scale(gt_poses_np, self.camera_pose)
-            # Apply Correction
-            if abs(scale - 1.0) > 1e-4:
-                print(f"Applying scale correction: {scale:.4f}")
-            return pcd, scale
+            cp_full = np.asarray(self.camera_pose, dtype=np.float64)
+            gt_full = np.asarray(gt_poses_np, dtype=np.float64)
+            n = min(len(cp_full), len(gt_full))
+            if n < 5:
+                print(
+                    f"[Scale Info] Too few frames for Sim3 alignment ({n} < 5). "
+                    f"Skipping alignment."
+                )
+                return pcd, 1.0
+
+            pred_R = cp_full[:n, :3, :3]
+            gt_R = gt_full[:n, :3, :3]
+            pred_xyz = cp_full[:n, :3, 3]
+            gt_xyz = gt_full[:n, :3, 3]
+
+            # Stage 1: orthogonal Procrustes on per-frame rotation columns.
+            M = np.einsum("tij,tkj->ik", gt_R, pred_R)
+            U, _, Vt = np.linalg.svd(M)
+            det_sign = np.sign(np.linalg.det(U @ Vt))
+            D = np.diag([1.0, 1.0, det_sign if det_sign != 0 else 1.0])
+            R = U @ D @ Vt
+
+            # Stage 2: scale + translation on translation columns under the known R.
+            pred_rot = pred_xyz @ R.T
+            pred_c = pred_rot.mean(axis=0)
+            gt_c = gt_xyz.mean(axis=0)
+            num = float(((gt_xyz - gt_c) ** 2).sum())
+            den = float(((pred_rot - pred_c) ** 2).sum())
+            if den < 1e-12 or not np.isfinite(num) or not np.isfinite(den):
+                print(
+                    f"[Scale Warning] Degenerate translation spread (den={den:.3e}). "
+                    f"Skipping alignment."
+                )
+                return pcd, 1.0
+            s = float(np.sqrt(num / den))
+            if not np.isfinite(s) or s <= 0:
+                print(f"[Scale Warning] Invalid scale ({s}). Skipping alignment.")
+                return pcd, 1.0
+            t = gt_c - s * pred_c
+
+            transformed = s * pred_rot + t
+            rmse = float(np.sqrt(((transformed - gt_xyz) ** 2).sum(axis=1).mean()))
+            # Rotation residual: median geodesic angle (deg) between R·R_pred and R_gt.
+            R_resid = np.einsum("ij,tjk->tik", R, pred_R)
+            cos_ang = np.clip(
+                (np.einsum("tii->t", np.einsum("tij,tkj->tik", R_resid, gt_R)) - 1.0) / 2.0,
+                -1.0, 1.0,
+            )
+            rot_err_deg = float(np.median(np.degrees(np.arccos(cos_ang))))
+
+            print(
+                f"[Scale Info] Sim3 alignment: scale={s:.4f}, RMSE={rmse:.4f} m, "
+                f"rot residual median={rot_err_deg:.2f} deg (n={n} frames)"
+            )
+
+            pcd_np = np.asarray(pcd, dtype=np.float64)
+            pcd_aligned = (s * (pcd_np @ R.T) + t).astype(np.float32)
+
+            new_cp = cp_full.copy()
+            new_cp[:, :3, 3] = s * (cp_full[:, :3, 3] @ R.T) + t
+            new_cp[:, :3, :3] = np.einsum("ij,tjk->tik", R, cp_full[:, :3, :3])
+            self.camera_pose = new_cp.astype(np.float32)
+            self.pcd = pcd_aligned
+
+            return pcd_aligned, s
 
         except Exception as e:
             print(f"[Scale Error] Exception during alignment: {e}")
@@ -541,10 +715,12 @@ class InternNavDataGenerator(DataGenerator):
 
         paths = self.get_io_paths(input_path)
 
-        # Execute core computation
+        # Execute core computation.
+        # ``align_with_gt_scale`` already applied the Sim3 transform to self.pcd and
+        # self.camera_pose, so the OCC/voxel stage must NOT re-scale (pass scale=1.0).
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(
-                pcd, mesh=mesh, T_cam2base=T_cam2base, scale=scale
+                pcd, mesh=mesh, T_cam2base=T_cam2base, scale=1.0
             )
         )
 
