@@ -27,6 +27,117 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ---- 3D trajectory helpers (第 7 张图与 PLY 导出共用) ------------------------------------
+
+# 与 plot_episode 内 1~6 图保持一致的三变体配色;GT 用黑色。
+_C_GT = "#111111"
+_C_RGB = "#d9534f"
+_C_INT = "#5cb85c"
+_C_DC = "#5bc0de"
+
+
+def _umeyama_sim3(source, target):
+    """完整 Umeyama (1991) 闭式 Sim3 — 返回 (s, R, t),使 target ≈ s*R*source + t。
+
+    用 SVD 计算最优旋转。本函数只在 exp_plot.py 内调用:Linux 进程内 / Windows 子进程,
+    两种通路都不会与主进程的 torch+MKL 在同一解释器里冲突(主进程的 umeyama_scale 因此
+    避开了 SVD,只算标量尺度)。失败/退化情形回退到 identity 变换,保证调用方拿到合法值。
+    """
+    src = np.asarray(source, dtype=np.float64)
+    dst = np.asarray(target, dtype=np.float64)
+    ok = np.isfinite(src).all(1) & np.isfinite(dst).all(1)
+    src, dst = src[ok], dst[ok]
+    if len(src) < 3:
+        return 1.0, np.eye(3), np.zeros(3)
+    mu_s, mu_d = src.mean(0), dst.mean(0)
+    src_c, dst_c = src - mu_s, dst - mu_d
+    H = src_c.T @ dst_c / len(src)
+    try:
+        U, D, Vt = np.linalg.svd(H)
+    except np.linalg.LinAlgError:
+        return 1.0, np.eye(3), np.zeros(3)
+    S = np.eye(3)
+    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
+        S[2, 2] = -1  # 强制 det(R) = +1, 防止镜像反射
+    R = Vt.T @ S @ U.T
+    var_s = (src_c ** 2).sum() / len(src)
+    s = float((D * np.diag(S)).sum() / max(var_s, 1e-12))
+    t = mu_d - s * (R @ mu_s)
+    return s, R, t
+
+
+def _apply_sim3(points, s, R, t):
+    """对 (N, 3) 点云应用 Sim3 变换:y = s * R @ x + t,返回 (N, 3)。"""
+    pts = np.asarray(points, dtype=np.float64)
+    return (s * (R @ pts.T)).T + t
+
+
+def _plot_traj_3d(ax, pos_gt, aligned, M):
+    """3D 子图:GT + 三变体(已对齐)叠画。每条轨迹 = 散点 + 细连接线,起点用大 marker。"""
+    sets = [("GT", pos_gt, _C_GT)] + [
+        ("model", aligned["model"], _C_RGB),
+        ("model_int", aligned["model_int"], _C_INT),
+        ("model_dc", aligned["model_dc"], _C_DC),
+    ]
+    for name, p, col in sets:
+        ax.plot(p[:, 0], p[:, 1], p[:, 2], "-", color=col, lw=0.9, alpha=0.85)
+        ax.scatter(p[:, 0], p[:, 1], p[:, 2], s=14, color=col, label=name,
+                   depthshade=False)
+        ax.scatter(p[0, 0], p[0, 1], p[0, 2], s=60, color=col,
+                   marker="o", edgecolors="white", linewidths=1.0, depthshade=False)
+    ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+    ax.set_title("3D trajectory (Sim3-aligned to GT)")
+    ax.legend(fontsize=8, loc="best")
+
+
+def _plot_traj_2d(ax, pos_gt, aligned, axes_pair, title):
+    """2D 投影子图:axes_pair = (i, j) 选 X/Y/Z 中两轴。"""
+    i, j = axes_pair
+    label = ["X", "Y", "Z"]
+    sets = [("GT", pos_gt, _C_GT)] + [
+        ("model", aligned["model"], _C_RGB),
+        ("model_int", aligned["model_int"], _C_INT),
+        ("model_dc", aligned["model_dc"], _C_DC),
+    ]
+    for name, p, col in sets:
+        ax.plot(p[:, i], p[:, j], "-", color=col, lw=0.9, alpha=0.85)
+        ax.scatter(p[:, i], p[:, j], s=12, color=col, label=name)
+        ax.scatter(p[0, i], p[0, j], s=55, color=col,
+                   marker="o", edgecolors="white", linewidths=1.0)
+    ax.set_xlabel(label[i]); ax.set_ylabel(label[j])
+    ax.set_title(title)
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+
+
+def _write_trajectories_ply(path, pos_gt, aligned):
+    """合并 4 条轨迹为一份 ASCII PLY,每个顶点带 per-vertex RGB(uint8)。
+
+    GT 黑、model 红、model_int 绿、model_dc 蓝,对应 _plot_traj_* 的视觉约定。
+    无 face,顶点顺序 = [GT..., model..., model_int..., model_dc...] (各 n 个)。
+    """
+    def _hex_to_rgb(h):
+        h = h.lstrip("#")
+        return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+    entries = [
+        (pos_gt, _hex_to_rgb(_C_GT)),
+        (aligned["model"], _hex_to_rgb(_C_RGB)),
+        (aligned["model_int"], _hex_to_rgb(_C_INT)),
+        (aligned["model_dc"], _hex_to_rgb(_C_DC)),
+    ]
+    total = sum(int(p.shape[0]) for p, _ in entries)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {total}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("end_header\n")
+        for pts, (r, g, b) in entries:
+            for x, y, z in pts:
+                f.write(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}\n")
+
 
 def plot_episode(out_dir):
     """渲染单个 episode 的 6 张诊断图(读 out_dir 下的 metrics.json + plotdata.npz)。"""
@@ -143,7 +254,49 @@ def plot_episode(out_dir):
             axes[r, c].axis("off")
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "6_depth_error_maps.png"), dpi=130); plt.close(fig)
 
-    print(f"[viz] saved 6 figures to {out_dir}")
+    # 7) Aligned 3D trajectory point clouds + PLY 导出 ----------------------------------
+    # 兼容旧 plotdata.npz (没有 pos_* 字段) — KeyError 直接跳过,前 6 图照常出。
+    n_figs = 6
+    extras = []
+    try:
+        pos_gt = d["pos_gt"]
+        pos_m  = d["pos_model"]
+        pos_i  = d["pos_model_int"]
+        pos_dc = d["pos_model_dc"]
+    except KeyError:
+        pass
+    else:
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registration side effect)
+
+        aligned = {
+            "model":     _apply_sim3(pos_m,  *_umeyama_sim3(pos_m,  pos_gt)),
+            "model_int": _apply_sim3(pos_i,  *_umeyama_sim3(pos_i,  pos_gt)),
+            "model_dc":  _apply_sim3(pos_dc, *_umeyama_sim3(pos_dc, pos_gt)),
+        }
+
+        fig = plt.figure(figsize=(11, 9))
+        _plot_traj_3d(fig.add_subplot(2, 2, 1, projection="3d"), pos_gt, aligned, M)
+        _plot_traj_2d(fig.add_subplot(2, 2, 2), pos_gt, aligned, axes_pair=(0, 1), title="XY top-down")
+        _plot_traj_2d(fig.add_subplot(2, 2, 3), pos_gt, aligned, axes_pair=(0, 2), title="XZ side")
+        _plot_traj_2d(fig.add_subplot(2, 2, 4), pos_gt, aligned, axes_pair=(1, 2), title="YZ side")
+        fig.suptitle(
+            f"{M.get('episode','?')}  L_gt={M['L_gt']:.3f} m  "
+            f"e: rgb={M['e_model']*100:.2f}% / int={M['e_model_int']*100:.2f}% / "
+            f"dc={M['e_model_dc']*100:.2f}%",
+            fontsize=10,
+        )
+        fig.tight_layout(); fig.savefig(os.path.join(out_dir, "7_trajectories_3d.png"), dpi=140)
+        plt.close(fig)
+        extras.append("7_trajectories_3d.png")
+
+        # 合并 4 条轨迹的 PLY (per-vertex RGB),可直接拖进 MeshLab/CloudCompare 互动查看。
+        ply_path = os.path.join(out_dir, "trajectories.ply")
+        _write_trajectories_ply(ply_path, pos_gt, aligned)
+        extras.append("trajectories.ply")
+        n_figs += 1
+
+    extras_tail = f" + {', '.join(extras)}" if extras else ""
+    print(f"[viz] saved {n_figs} figures to {out_dir}{extras_tail}")
 
 
 def plot_summary(out_dir):

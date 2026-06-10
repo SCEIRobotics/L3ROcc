@@ -221,27 +221,30 @@ GT 来自 Unitree 腿部里程计 + IMU + 手眼 `t_cam2gripper`。
 
 GT 直接取 parquet `action` 列的 4×4 SE(3) 矩阵平移分量（无里程计噪声）。
 
-| Variant | Mean `e_*` | Median `e_*` | Median `c_gt_*` | Median `metric_*` |
-|---|---:|---:|---:|---:|
-| `model` — RGB only | 2.58% | 2.24% | 1.003 | 0.308 |
-| `model_int` — RGB + K | 2.58% | 2.24% | 1.003 | 0.308 |
-| `model_dc` — RGB + K + depth | 4.11% | 2.94% | 1.005 | 0.306 |
+| Variant | Mean `e_*` | Median `e_*` | Median `c_gt_*` | Median `metric_*` | Median `s_depth_*` |
+|---|---:|---:|---:|---:|---:|
+| `model` — RGB only | 2.58% | 2.24% | 1.003 | 0.308 | 0.999 |
+| `model_int` — RGB + K | **2.23%** | **1.44%** | 1.006 | 0.310 | 1.005 |
+| `model_dc` — RGB + K + depth | 5.37% | 3.90% | 0.963 | 0.310 | 0.960 |
 
 **主要观察**：
-- 干净 GT 下 Pi3X 尺度残差仅 ~2-3%（`c_gt` ≈ 1.00）。
-- `model` 与 `model_int` 结果完全相同，说明 N1 路径下内参未真正传入 Pi3X（待查）。
-- `model_dc` 略差于 `model`，因 N1 深度视频编码与 gray16le 解码不匹配，深度数值不可信，污染了 conditioning。N1 上的 `s_depth_*`（≈ 13）与 `model_dc` 结果当前不可读。
-- `metric_*` 跨数据集均 ≈ 0.30，与变体无关，印证其为固定内部增益。
+- 干净 GT 下 Pi3X 尺度残差仅 ~1.5-3%（`c_gt` ≈ 1.00）；`model_int` 1.44% 已接近本实验设置下的极限。
+- `model_int` 显著优于 `model`（median e_* -36%，mean -14%）：**加 calibrated K 在 N1 上确实更准**，这是 README §9 期待的"内参消除焦距偏差"在本实验中得到的定量验证。
+- `s_depth_*` 三变体均 ≈ 1.0：Pi3X 预测深度与传感器深度同尺度对齐，深度数据通路无问题。
+- `model_dc` 反而比 `model_int` 略差（median 3.90% vs 1.44%）：**这不是数据 bug**，是 Pi3X 模型内在行为——`c_gt_dc = 0.963 < 1` 与 `s_depth_dc = 0.960 < 1` 方向一致，加深度后 Pi3X 把轨迹与预测深度同向放大 ~3-4%；同时推理路径里 Pi3X 仍跑一个 `scale_aug ∈ [0.8, 1.2]` 随机增强，加大单集方差。这是 Pi3X 模型层的偏置，不在本仓库的数据通路修复范围内。
+- `metric_*` 终于有可观察的小幅响应：`metric_rgb=0.308` → `metric_int=0.310`（+0.7%）。比较以前看到的"三变体逐位相等"已显著改善，但量级仍小。
 
 ### 8.3 综合结论
 
 | GT 质量 | 数据 | n | Median `e_model` | 解读 |
 |---|---|---:|---:|---|
-| 干净合成 GT | InternData-N1 / 3D-Front | 21 | **2.2%** | Pi3X 本身尺度残差 ≈ 2-3% |
+| 干净合成 GT | InternData-N1 / 3D-Front | 21 | **2.2%**（model_int **1.44%**）| Pi3X 本身尺度残差 ≈ 1.5-3% |
 | 真实噪声 GT | Unitree rosbag | 32 | 9.6% | 模型 ~3% + GT 噪声 ~5-7% 叠加 |
 
 **可用**（精度 3-10%）：`cam_pos` 路径长度与几何形状、`pred_depth`、`c_gt_*` / `e_model_*`。
 
-**不可直接读为 scale 结论**：`metric_*` 标量（固定 ≈ 0.30，与场景无关）；"加内参 conditioning 有效"的结论（两数据集上差异均 < 0.4% 或为零，尚无统计支撑）。
+**最佳 conditioning 配置**：**`model_int`（RGB + calibrated K）**——在干净 GT 上 mean -14% / median -36%，win count 与方差均优于 `model`；加深度（`model_dc`）反而引入 Pi3X 内在的 scale_aug 噪声 + metric 头偏置，**不带来定量增益**。
 
-**实操指南**：把 `cam_pos / pred_depth` 当 **3-5% 精度的弱公制**，需更高精度时再事后做一次尺度对齐（用已知距离/物体/独立 GT）；报告只引用 `c_gt_*` 或 `e_model_*`，不引用 `metric_*`。
+**不可直接读为 scale 结论**：`metric_*` 标量（固定 ≈ 0.30，与场景无关，只对 conditioning 有 ≤1% 微响应）。
+
+**实操指南**：把 `cam_pos / pred_depth` 当 **3-5% 精度的弱公制**，需更高精度时再事后做一次尺度对齐（用已知距离/物体/独立 GT）；报告只引用 `c_gt_*` 或 `e_model_*`，不引用 `metric_*`；conditioning 默认上 K、慎用 depth。

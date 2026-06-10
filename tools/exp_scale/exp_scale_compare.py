@@ -629,6 +629,12 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
             sensor_d=sensor_d[:n].astype(np.float32),
             conf_rgb=rgb["conf"][:n].astype(np.float32),
             dmin=args.dmin, dmax=args.dmax, conf_thr=args.conf_thr,
+            # 4 条 (n, 3) 相机中心轨迹,供 exp_plot.py 第 7 图 (3D 轨迹) + PLY 导出使用。
+            # GT 在世界系/odom 系;三变体在各自 Pi3X 内部系,绘图侧做 Sim3 对齐到 GT。
+            pos_gt=gt_cam[:n].astype(np.float32),
+            pos_model=rgb_pos[:n].astype(np.float32),
+            pos_model_int=intr_pos[:n].astype(np.float32),
+            pos_model_dc=dc_pos[:n].astype(np.float32),
         )
         render(out_dir, "episode")
 
