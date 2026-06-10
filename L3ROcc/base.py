@@ -198,9 +198,10 @@ class DataGenerator:
             device=self.device,
         )  # imgs: [N, 3, H, W] on self.device
 
-        # ``K_rescaled`` is metadata (numpy K at resized resolution), not a Pi3X kwarg —
-        # pop it before splatting so ``model(**conditions)`` does not see an unknown argument.
+        # ``K_rescaled`` and ``depth_source`` are metadata, not Pi3X kwargs —
+        # pop them before splatting so ``model(**conditions)`` does not see unknown arguments.
         K_rescaled = conditions.pop("K_rescaled", None)
+        conditions.pop("depth_source", None)
 
         # Run model inference to get point clouds and camera poses
         print("Running model inference...")
