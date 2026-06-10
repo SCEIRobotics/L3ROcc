@@ -976,48 +976,111 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         out_K_rescaled = intr  # keep numpy copy so downstream can save it as ground-truth K
 
     # --- 6. Build depth condition ---
+    # 三种合法的"公制深度源":
+    #   A. 16-bit PNG 目录 (InternData-N1: observation.images.depth/<idx>.png)
+    #   B. gray16le mp4/mkv (Unitree gray16le 编码)
+    # 其它(尤其是 8-bit yuv420p mp4)会被静默升位成假 16-bit、再除以 1000,
+    # 输出 ~12-15 量级的"非米噪声",上一版 cv2 8-bit fallback 同样错(0-255÷255 也不是米)。
+    # 因此本版**拒绝任何非 16-bit 的视频源**,把噪声从源头掐掉。
+    out_depth_source = "none"
     if condit_depth_path is not None and os.path.exists(condit_depth_path):
-        import av
-        resized_depths_list = []
         ext = condit_depth_path.lower()
-        if ext.endswith(".mkv") or ext.endswith(".mp4"):
-            # Decode as gray16le via PyAV (works for MKV and depth-encoded MP4).
-            # Values in 16-bit unsigned mm -> divide by 1000 to get meters.
+        resized_depths_list = []
+
+        # 6.0 自动切源: 当上层把 N1 的 observation.video.depth/<ep>.mp4 (8-bit) 当 condit
+        # 传进来,但同 trajectory 下其实有 observation.images.depth/ (16-bit PNG 序列),
+        # 优先切到 PNG 目录 —— 这是 N1 真公制深度的官方原件。
+        resolved_path = condit_depth_path
+        if os.path.isfile(condit_depth_path) and (ext.endswith(".mp4") or ext.endswith(".mkv")):
+            png_dir = os.path.dirname(condit_depth_path).replace(
+                "observation.video.depth", "observation.images.depth"
+            )
+            if (
+                png_dir != os.path.dirname(condit_depth_path)
+                and os.path.isdir(png_dir)
+                and any(f.lower().endswith(".png") for f in os.listdir(png_dir))
+            ):
+                print(f"[depth] auto-switch from mp4 to 16-bit PNG dir: {png_dir}")
+                resolved_path = png_dir
+
+        if os.path.isdir(resolved_path):
+            # 6A. PNG 序列 (InternData-N1 真公制 16-bit 编码)
+            #
+            # 编码约定 (实测推导, 见 README §11.3): N1 PNG 是 uint16, **0.1 mm/LSB**:
+            #   - 0  = 缺失/未填充 (Pi3X 已经把 0 当无效处理)
+            #   - 65535 = 饱和 / 远裁面 / 天空 (必须当作无效, 否则 Pi3X 把它当 6.55 m 的真深度)
+            #   - 其它 = 真深度毫米十分位 (满量程 65535 -> 6.5535 m, 典型室内远裁面)
+            #
+            # 这与 Unitree gray16le mp4 (1 mm/LSB) 不是同一个约定; 不能混用除数。
+            png_files = [f for f in os.listdir(resolved_path) if f.lower().endswith(".png")]
+            # 数字 stem 排序: 兼容 0.png/100.png 这种非零填充的 N1 命名
+            def _stem_key(name):
+                stem = os.path.splitext(name)[0]
+                return int(stem) if stem.isdigit() else stem
+            png_files = sorted(png_files, key=_stem_key)
+            median_check_sample = None
+            for i in range(0, len(png_files), interval):
+                d_map = cv2.imread(
+                    os.path.join(resolved_path, png_files[i]), cv2.IMREAD_UNCHANGED
+                )
+                if d_map is None:
+                    continue
+                # 远裁面/天空 sentinel 65535 -> 0 (Pi3X 视为无效, 不参与 conditioning)
+                d_map = d_map.copy()
+                d_map[d_map == 65535] = 0
+                d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                d_resized = d_resized.astype(np.float32) / 10000.0  # 0.1 mm -> m
+                d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
+                resized_depths_list.append(torch.from_numpy(d_resized))
+                # 取第一帧做合理性检查
+                if median_check_sample is None:
+                    pos = d_resized[d_resized > 0]
+                    if pos.size > 0:
+                        median_check_sample = float(np.median(pos))
+            # 合理性警示: 若 ÷10000 后的中位深度仍 > 8 m, 多半接到了非 N1 编码的 PNG 集
+            if median_check_sample is not None and median_check_sample > 8.0:
+                print(f"[Warning] PNG depth median {median_check_sample:.2f} m > 8 m. "
+                      f"N1 约定 0.1 mm/LSB 通常给出 0.5-3 m 中位。该数据集可能用了不同约定, "
+                      f"核对编码后再用 model_dc 结果。")
+            out_depth_source = "png_dir"
+        elif ext.endswith(".mkv") or ext.endswith(".mp4"):
+            # 6B. mp4/mkv: 先验证是 16-bit pix_fmt 再走 gray16le; 8-bit 直接拒
+            import av
             try:
-                container = av.open(str(condit_depth_path))
-                video_stream = container.streams.video[0]
-                for av_frame in islice(container.decode(video_stream), 0, None, interval):
-                    d_map = av_frame.to_ndarray(format='gray16le')
-                    d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
-                    d_resized = d_resized.astype(np.float32) / 1000.0  # mm -> m
-                    d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
-                    resized_depths_list.append(torch.from_numpy(d_resized))
-                container.close()
+                container = av.open(str(resolved_path))
             except Exception as e:
-                # Fallback: cv2 8-bit read -- depth will be relative [0,1], not metric.
-                # This happens when the depth video uses a standard 8-bit codec.
-                print(f"[Warning] gray16le decode failed ({e}). "
-                      "Falling back to cv2 8-bit reading -- depth will NOT be metric (relative [0,1]).")
-                resized_depths_list = []
-                cap = cv2.VideoCapture(condit_depth_path)
-                if not cap.isOpened():
-                    raise IOError(f"Cannot open depth video: {condit_depth_path}")
-                frame_idx = 0
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    if frame_idx % interval == 0:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        d_resized = cv2.resize(gray, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
-                        d_resized = d_resized.astype(np.float32) / 255.0
+                print(f"[Warning] failed to open depth video {resolved_path}: {e}. "
+                      "Skipping depth conditioning.")
+                container = None
+            if container is not None:
+                video_stream = container.streams.video[0]
+                pix_fmt = (video_stream.codec_context.pix_fmt or "").lower()
+                # gray16le, yuv420p10le, gbrp16le 等都含 "16"; 8-bit yuv420p / yuvj420p / gray 不含
+                is_16bit = ("16" in pix_fmt) or ("gray16" in pix_fmt)
+                if not is_16bit:
+                    print(
+                        f"[Warning] depth video pix_fmt={pix_fmt!r} is not 16-bit. "
+                        f"PyAV gray16le decode would left-shift 8-bit luma into fake 16-bit -> "
+                        f"non-metric noise. Skipping depth conditioning. "
+                        f"For metric depth, switch to a 16-bit PNG sequence under "
+                        f"observation.images.depth/ alongside the mp4."
+                    )
+                    container.close()
+                    out_depth_source = "none_skipped_8bit_mp4"
+                else:
+                    # 现有 gray16le 路径 (Unitree), 逐字节保留
+                    for av_frame in islice(container.decode(video_stream), 0, None, interval):
+                        d_map = av_frame.to_ndarray(format='gray16le')
+                        d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                        d_resized = d_resized.astype(np.float32) / 1000.0  # mm -> m
                         d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
                         resized_depths_list.append(torch.from_numpy(d_resized))
-                    frame_idx += 1
-                cap.release()
+                    container.close()
+                    out_depth_source = "mp4_gray16le"
         else:
-            print(f"[Warning] Unsupported depth file extension: {condit_depth_path}. "
-                  "Expected .mkv or .mp4. Skipping depth conditioning.")
+            print(f"[Warning] Unsupported depth path: {condit_depth_path}. "
+                  "Expected a .mkv/.mp4 file or a directory of 16-bit PNGs. "
+                  "Skipping depth conditioning.")
 
         n_depth = len(resized_depths_list)
         if n_depth > 0:
@@ -1044,4 +1107,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         # Set only when an external real intrinsic was provided; downstream uses it as the
         # authoritative K (at resized resolution) instead of the model's back-calculated estimate.
         'K_rescaled': out_K_rescaled,  # numpy (3, 3) or None
+        # Metadata: 实际投喂给 Pi3X 的深度源, 用于 metrics.json 事后对账。
+        # 取值: 'png_dir' / 'mp4_gray16le' / 'none' / 'none_skipped_8bit_mp4'
+        'depth_source': out_depth_source,
     }

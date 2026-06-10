@@ -253,6 +253,12 @@ def load_gt_camera_positions(parquet_path, info_json_path, interval, n_keep):
 # --------------------------------------------------------------------------------------
 # Pi3X 推理
 # --------------------------------------------------------------------------------------
+
+# Pi3X 真正接收的 conditioning kwargs 白名单。load_images_as_tensor 还会塞入
+# 'K_rescaled' / 'depth_source' 等元数据,它们在 splat 给 model() 前必须被剔除。
+_PI3X_KWARGS = {"poses", "depths", "intrinsics"}
+
+
 @torch.no_grad()
 def run_pi3x(gen, imgs, conditions=None):
     """运行 Pi3X(conditions 为 None 时即仅 RGB)，并把关键张量取回 CPU。"""
@@ -263,8 +269,9 @@ def run_pi3x(gen, imgs, conditions=None):
         if conditions is None:
             res = gen.model(imgs[None])
         else:
-            # K_rescaled 是 utils 透传的元数据,不是 Pi3X kwarg,splat 前剔除。
-            cond_kwargs = {k: v for k, v in conditions.items() if k != "K_rescaled"}
+            # 正向白名单: load_images_as_tensor 会顺带返回 K_rescaled / depth_source 等
+            # 元数据 (非 Pi3X kwarg), splat 前必须过滤。用白名单而非每加一个字段就改一次黑名单。
+            cond_kwargs = {k: v for k, v in conditions.items() if k in _PI3X_KWARGS}
             res = gen.model(imgs[None], **cond_kwargs)
 
     out = {
@@ -488,6 +495,8 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
     _ci = conditions.get("intrinsics")
     print(f"[{label}] conditions['intrinsics'] = "
           f"{None if _ci is None else tuple(_ci.shape)}")
+    # 同步打印实际命中的 depth 源 (png_dir / mp4_gray16le / none / none_skipped_8bit_mp4)。
+    print(f"[{label}] conditions['depth_source'] = {conditions.get('depth_source', '(missing)')}")
     imgs = imgs.to(gen.device)
     N = imgs.shape[0]
     if conditions.get("depths") is None:
@@ -563,6 +572,8 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
         # 用途: 验证 §11.2 的 N1 内参通路是否真的命中 parquet 分支 (而不是被静默丢回 None)。
         "camera_intrinsic_used": intr_np.tolist() if intr_np is not None else None,
         "camera_intrinsic_source": intr_source,
+        # 深度源对账: §11.3 修复后用于确认 N1 自动切到 16-bit PNG 目录、Unitree 仍走 gray16le mp4。
+        "depth_source": conditions.get("depth_source", "unknown"),
         "metric_rgb": rgb["metric"],
         "metric_int": intr["metric"],
         "metric_dc": dc["metric"],
