@@ -107,6 +107,11 @@ def _load_intrinsics_from_parquet(parquet_path):
     InternData-N1 在每个 trajectory 的 parquet 中写入了 ``observation.camera_intrinsic``;
     其 meta/info.json 不再含 ``head_camera_intrinsic``。该列可能是 (3,3) 矩阵、长度 9
     的展开,或 3 个长度 3 的子列表 —— 任意一种都还原成 (3,3) np.float32;无法还原返回 None。
+
+    实现细节:N1 的该 cell 是 numpy 嵌套结构 (ndarray of ndarrays),直接
+    ``np.asarray(cell, dtype=float32)`` 会触发 "setting an array element with a sequence"
+    并被 except 静默吞掉。必须先 ``.tolist()`` 展开外层再 asarray,与 probe_n1_intrinsics
+    一致。
     """
     if not parquet_path or not os.path.isfile(parquet_path):
         return None
@@ -116,9 +121,10 @@ def _load_intrinsics_from_parquet(parquet_path):
         return None
     if "observation.camera_intrinsic" not in df.columns or len(df) == 0:
         return None
-    raw = df["observation.camera_intrinsic"].tolist()[0]
+    raw = df["observation.camera_intrinsic"].iloc[0]
     try:
-        arr = np.asarray(raw, dtype=np.float32)
+        raw_list = raw.tolist() if hasattr(raw, "tolist") else raw
+        arr = np.asarray(raw_list, dtype=np.float32)
     except Exception:
         return None
     if arr.shape == (3, 3):
@@ -449,25 +455,39 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
     #   > 当前 trajectory parquet 的 observation.camera_intrinsic 列(InternData-N1 写在这里)
     #   > 当前 rosbag 自身 meta/info.json 的 head_camera_intrinsic (lerobot rosbag 路径)
     #   > None — 让 Pi3X 自己反算 K (三变体中 int/dc 退化为无 K 条件,等价于 RGB-only)
+    intr_source = "none_pi3x_back_calc"
     if cli_intrinsics_np is not None:
         intr_np = cli_intrinsics_np
+        intr_source = "cli"
         print(f"[{label}] 使用 CLI --condit_intr_path 的内参 (覆盖 {os.path.basename(rb)} 自身)。")
     else:
         intr_np = _load_intrinsics_from_parquet(parquet_path)
         if intr_np is not None:
+            intr_source = "parquet"
             print(f"[{label}] 使用 parquet observation.camera_intrinsic 内参。")
         else:
             intr_np = _load_intrinsics_from_json(info_json_path)
             if intr_np is not None:
+                intr_source = "info_json"
                 print(f"[{label}] 使用 meta/info.json head_camera_intrinsic 内参。")
             else:
                 print(f"[{label}] 未找到内参 (CLI/parquet/info.json 均无),由 Pi3X 自行反算。")
+
+    if intr_np is not None:
+        print(f"[{label}] intr_np shape={tuple(intr_np.shape)} "
+              f"fx,fy,cx,cy={intr_np[0,0]:.2f},{intr_np[1,1]:.2f},"
+              f"{intr_np[0,2]:.2f},{intr_np[1,2]:.2f}")
 
     interval = gen.interval
     imgs, traj_len, conditions = load_images_as_tensor(
         rgb_path, interval=interval, PIXEL_LIMIT=args.pixel_limit,
         condit_depth_path=depth_path, intrinsics_np=intr_np, device=gen.device,
     )
+    # 关键可观察性: 若 intr_np 非 None 但 conditions["intrinsics"] 是 None,
+    # 说明 K 被 load_images_as_tensor 静默丢了 — model_int/dc 会退化等同 model。
+    _ci = conditions.get("intrinsics")
+    print(f"[{label}] conditions['intrinsics'] = "
+          f"{None if _ci is None else tuple(_ci.shape)}")
     imgs = imgs.to(gen.device)
     N = imgs.shape[0]
     if conditions.get("depths") is None:
@@ -539,6 +559,10 @@ def process_episode(gen, rb, episode, out_dir, label, args, do_plots, cli_intrin
         "episode": label,
         "n_frames": int(n),
         "skipped": skipped,
+        # 内参溯源: 投喂给 model_int / model_dc 的实际 K, 以及它来自哪条优先级分支。
+        # 用途: 验证 §11.2 的 N1 内参通路是否真的命中 parquet 分支 (而不是被静默丢回 None)。
+        "camera_intrinsic_used": intr_np.tolist() if intr_np is not None else None,
+        "camera_intrinsic_source": intr_source,
         "metric_rgb": rgb["metric"],
         "metric_int": intr["metric"],
         "metric_dc": dc["metric"],
