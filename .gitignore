@@ -42,3 +42,4 @@ pyproject.toml
 /.claude
 .zed/
 /tools/run_bash
+/tools/exp_scale/README_exp_temp.md
