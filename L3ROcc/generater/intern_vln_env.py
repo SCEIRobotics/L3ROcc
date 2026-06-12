@@ -303,6 +303,27 @@ class InternNavDataGenerator(DataGenerator):
                         f"to body-center trajectory."
                     )
 
+                from scipy.spatial.transform import Rotation as _Rot
+                eu_c2b = _Rot.from_matrix(R_cam2body).as_euler("xyz", degrees=True)
+                # Physical down-tilt: camera z (OpenCV forward) projected into body frame.
+                # XYZ-Euler 'pitch' is misleading when |roll|>10° (the down-tilt hides in
+                # the roll/yaw composition). The geometrically correct number is the angle
+                # between camera z and the body horizontal plane.
+                _z_cam_in_body = R_cam2body @ np.array([0.0, 0.0, 1.0])
+                _horiz = float(np.sqrt(_z_cam_in_body[0] ** 2 + _z_cam_in_body[1] ** 2))
+                tilt_down_deg = float(np.degrees(np.arctan2(-_z_cam_in_body[2], _horiz)))
+                print(
+                    f"[GT-diag] R_cam2gripper euler XYZ raw (deg): "
+                    f"roll={eu_c2b[0]:.2f} pitch={eu_c2b[1]:.2f} yaw={eu_c2b[2]:.2f} "
+                    f"(note: XYZ pitch ≠ physical tilt when |roll|>10°)"
+                )
+                print(
+                    f"[GT-diag] camera forward (z) in body = {_z_cam_in_body.tolist()}; "
+                    f"physical down-tilt = {tilt_down_deg:.2f} deg "
+                    f"(expected ~20° for Go2 head-mount; <5° ⇒ install tilt missed; "
+                    f"t_cam2body (m)={t_cam2body.tolist()})"
+                )
+
                 R_wb = _quat_wxyz_to_R(quat_wxyz)
                 cam_pos = np.einsum("tij,j->ti", R_wb, t_cam2body) + p_body
                 R_world_cam = np.einsum("tij,jk->tik", R_wb, R_cam2body)
@@ -439,6 +460,27 @@ class InternNavDataGenerator(DataGenerator):
             D = np.diag([1.0, 1.0, det_sign if det_sign != 0 else 1.0])
             R = U @ D @ Vt
 
+            from scipy.spatial.transform import Rotation as _Rot
+            R_diff_0 = gt_R[0] @ pred_R[0].T
+            eu_R = _Rot.from_matrix(R).as_euler("xyz", degrees=True)
+            eu_diff0 = _Rot.from_matrix(R_diff_0).as_euler("xyz", degrees=True)
+            frob_R_minus_diff0 = float(np.linalg.norm(R - R_diff_0))
+            sv_M = np.linalg.svd(M, compute_uv=False)
+            cond_M = float(sv_M[0] / max(sv_M[-1], 1e-12))
+            print(
+                f"[Align-diag] solved R euler XYZ (deg): "
+                f"roll={eu_R[0]:.2f} pitch={eu_R[1]:.2f} yaw={eu_R[2]:.2f}"
+            )
+            print(
+                f"[Align-diag] frame-0 (R_gt @ R_pred.T) euler XYZ (deg): "
+                f"roll={eu_diff0[0]:.2f} pitch={eu_diff0[1]:.2f} yaw={eu_diff0[2]:.2f}"
+            )
+            print(
+                f"[Align-diag] |R - R_diff_0|_F = {frob_R_minus_diff0:.4f} "
+                f"(small ⇒ c2w convention consistent; >0.5 ⇒ likely transpose mismatch); "
+                f"M singular values = {sv_M.tolist()}, cond(M) = {cond_M:.2e}"
+            )
+
             # Stage 2: scale + translation on translation columns under the known R.
             pred_rot = pred_xyz @ R.T
             pred_c = pred_rot.mean(axis=0)
@@ -478,7 +520,103 @@ class InternNavDataGenerator(DataGenerator):
             new_cp = cp_full.copy()
             new_cp[:, :3, 3] = s * (cp_full[:, :3, 3] @ R.T) + t
             new_cp[:, :3, :3] = np.einsum("ij,tjk->tik", R, cp_full[:, :3, :3])
-            self.camera_pose = new_cp.astype(np.float32)
+            new_cp = new_cp.astype(np.float32)
+
+            # P6: ground-plane RANSAC on aligned pcd, report tilt vs world Z.
+            # P7: when tilt > threshold, apply Rodrigues gravity correction so the
+            # dominant ground plane normal aligns with +Z (compensates the Unitree odom
+            # Z-axis vs absolute gravity offset — see plan §3/§4.3).
+            tilt_pcd_deg = float("nan")
+            try:
+                import open3d as _o3d
+                _pcd_o3d = _o3d.geometry.PointCloud()
+                _pcd_o3d.points = _o3d.utility.Vector3dVector(pcd_aligned.astype(np.float64))
+                _plane, _inliers = _pcd_o3d.segment_plane(
+                    distance_threshold=0.05, ransac_n=3, num_iterations=300
+                )
+                n_ground = np.asarray(_plane[:3], dtype=np.float64)
+                n_ground /= max(np.linalg.norm(n_ground), 1e-12)
+                if n_ground[2] < 0:
+                    n_ground = -n_ground
+                tilt_pcd_deg = float(np.degrees(np.arccos(np.clip(n_ground[2], -1.0, 1.0))))
+                inlier_frac = len(_inliers) / max(len(pcd_aligned), 1)
+                print(
+                    f"[Pcd-diag] aligned-pcd ground plane: normal={n_ground.tolist()}, "
+                    f"inlier_frac={inlier_frac:.3f}, tilt vs world Z = {tilt_pcd_deg:.2f} deg"
+                )
+
+                # Threshold for triggering gravity correction.
+                # Empirical: real lerobot rosbags show tilt_pcd_deg ≈ 4-5°
+                # (Unitree odom Z is initialized from startup pose, drifts ~3-4°
+                # from absolute gravity; combined with calibration + Procrustes
+                # residuals gives ~4-5° total). N1 synthetic data is gravity-aligned
+                # by construction so tilt_pcd_deg ≈ 0-1° and P7 is automatically
+                # skipped. 2.0° leaves 1° margin above noise floor for lerobot
+                # while still skipping N1.
+                GRAV_TILT_THRESH_DEG = 2.0
+                if tilt_pcd_deg > GRAV_TILT_THRESH_DEG:
+                    target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                    axis = np.cross(n_ground, target)
+                    s_axis = float(np.linalg.norm(axis))
+                    c_axis = float(np.dot(n_ground, target))
+                    if s_axis > 1e-6:
+                        k_unit = axis / s_axis
+                        K_skew = np.array(
+                            [[0.0, -k_unit[2], k_unit[1]],
+                             [k_unit[2], 0.0, -k_unit[0]],
+                             [-k_unit[1], k_unit[0], 0.0]],
+                            dtype=np.float64,
+                        )
+                        R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+                        pivot = new_cp[0, :3, 3].astype(np.float64)
+
+                        pcd_g = (R_grav @ (pcd_aligned.astype(np.float64) - pivot).T).T + pivot
+                        pcd_aligned = pcd_g.astype(np.float32)
+
+                        cp_t = (R_grav @ (new_cp[:, :3, 3].astype(np.float64) - pivot).T).T + pivot
+                        cp_R = np.einsum(
+                            "ij,tjk->tik", R_grav, new_cp[:, :3, :3].astype(np.float64)
+                        )
+                        new_cp[:, :3, 3] = cp_t.astype(np.float32)
+                        new_cp[:, :3, :3] = cp_R.astype(np.float32)
+
+                        # Re-fit ground for verification.
+                        tilt_after = float("nan")
+                        try:
+                            _pcd_o3d2 = _o3d.geometry.PointCloud()
+                            _pcd_o3d2.points = _o3d.utility.Vector3dVector(
+                                pcd_aligned.astype(np.float64)
+                            )
+                            _pm2, _ = _pcd_o3d2.segment_plane(
+                                distance_threshold=0.05, ransac_n=3, num_iterations=300
+                            )
+                            n2 = np.asarray(_pm2[:3], dtype=np.float64)
+                            n2 /= max(np.linalg.norm(n2), 1e-12)
+                            if n2[2] < 0:
+                                n2 = -n2
+                            tilt_after = float(np.degrees(np.arccos(np.clip(n2[2], -1.0, 1.0))))
+                        except Exception as _e2:
+                            print(f"[Pcd-fix] post-fix RANSAC failed: {_e2}")
+                        print(
+                            f"[Pcd-fix] gravity correction: rotated pcd+cam by "
+                            f"{tilt_pcd_deg:.2f} deg around pivot={pivot.tolist()} "
+                            f"(axis={k_unit.tolist()}); post-fix ground tilt vs Z = "
+                            f"{tilt_after:.2f} deg."
+                        )
+                    else:
+                        print(
+                            f"[Pcd-fix] skipped: ground normal {n_ground.tolist()} already ≈ +Z "
+                            f"(|axis|={s_axis:.4f} below floating-point threshold)."
+                        )
+                else:
+                    print(
+                        f"[Pcd-fix] skipped: tilt={tilt_pcd_deg:.2f}° ≤ "
+                        f"{GRAV_TILT_THRESH_DEG}° threshold (GT Z already gravity-aligned)."
+                    )
+            except Exception as _e:
+                print(f"[Pcd-diag] ground plane RANSAC / gravity fix failed: {_e}")
+
+            self.camera_pose = new_cp
             self.pcd = pcd_aligned
 
             return pcd_aligned, s
