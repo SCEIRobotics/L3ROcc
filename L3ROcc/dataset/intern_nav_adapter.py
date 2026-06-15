@@ -239,18 +239,39 @@ class InternNavSequenceLoader:
                 f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
             )
 
-        # 3. Fallback: try meta/info.json for Pi3X conditioning intrinsics
-        if camera_intrinsic is None:
+        # 3. Fallback: try meta/info.json for intrinsics and/or hand-eye extrinsic.
+        #    lerobot parquet 既无 observation.camera_intrinsic 也无 observation.camera_extrinsic,
+        #    内参/外参都需从 meta/info.json 取（外参=手眼标定 R_cam2gripper，cam->base 旋转）。
+        if camera_intrinsic is None or camera_extrinsic is None:
             info_json_path = os.path.join(traj_root, "meta", "info.json")
             if os.path.exists(info_json_path):
                 with open(info_json_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
-                if "head_camera_intrinsic" in meta:
+                if camera_intrinsic is None and "head_camera_intrinsic" in meta:
                     camera_intrinsic = _reshape_matrix(
                         meta["head_camera_intrinsic"], (3, 3)
                     )
                     print(
                         f"Loaded head_camera_intrinsic from info.json for trajectory {index}."
+                    )
+                # 手眼外参 -> T_cam2base(仅旋转参与下游 convert_pointcloud_camera_to_base)。
+                ext = meta.get("head_camera_extrinsic", {})
+                if camera_extrinsic is None and "R_cam2gripper" in ext:
+                    R_c2b = _reshape_matrix(ext["R_cam2gripper"], (3, 3))
+                    if R_c2b is None:
+                        raise ValueError(
+                            f"head_camera_extrinsic.R_cam2gripper in {info_json_path} "
+                            f"is not a 3x3 matrix"
+                        )
+                    T = np.eye(4)
+                    T[:3, :3] = R_c2b
+                    t_raw = ext.get("t_cam2gripper", None)
+                    if t_raw is not None:
+                        T[:3, 3] = np.array(t_raw, dtype=float).reshape(3)
+                    camera_extrinsic = T
+                    print(
+                        f"Loaded head_camera_extrinsic.R_cam2gripper from info.json "
+                        f"as T_cam2base for trajectory {index}."
                     )
 
         return video_path, depth_path, camera_intrinsic, camera_extrinsic

@@ -115,6 +115,8 @@ class DataGenerator:
         self.voxel_size_scale = self.config["voxel_size_scale"]
         self.history_len = self.config["history_len"]
         self.history_step = self.config["history_step"]
+        # GT-free 世界系对齐的 metric 尺度修正系数（默认 1.0 = 直接信任 metric_head）。
+        self.metric_scale_correction = self.config.get("metric_scale_correction", 1.0)
         self.occ_history_buffer = deque(
             maxlen=self.history_len
         )  # Fixed-length queue for sliding window

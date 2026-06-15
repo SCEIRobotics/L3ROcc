@@ -13,3 +13,6 @@
 'history_len': 10
 'history_step': 2
 'fps': 30.0
+# GT-free 世界系对齐：metric 尺度修正系数。默认 1.0 = 直接信任 Pi3X metric_head。
+# 实验测得真实(lerobot/ZED)数据 pred/sensor≈0.92(偏小~8%)，如需补偿可设 ~1.08；合成(N1)≈1.0 保持 1.0。
+'metric_scale_correction': 1.0

@@ -625,6 +625,179 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Scale Error] Exception during alignment: {e}")
             return pcd, 1.0
 
+    def _gravity_align_to_z(self, pcd, camera_pose, pivot):
+        """用地面 RANSAC 估重力方向，构造把地面法向转到 +Z 的 Rodrigues 旋转，绕 pivot
+        同步旋转点云与相机位姿。
+
+        Args:
+            pcd : (N, 3) 点云（将被旋转）
+            camera_pose : (T, 4, 4) 相机位姿（将被旋转）
+            pivot : (3,) 旋转中心（通常帧 0 相机位置）
+
+        Returns:
+            (pcd_rot (N,3) f32, camera_pose_rot (T,4,4) f32, tilt_before_deg,
+             tilt_after_deg, ground_z)  —— ground_z 为旋转后地面在世界系的 z 电平
+        """
+        import open3d as o3d
+
+        pcd64 = np.asarray(pcd, dtype=np.float64)
+        if pcd64.shape[0] < 100:
+            raise ValueError(
+                f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}"
+            )
+
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(pcd64)
+        plane, inliers = o3d_pcd.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        # 法向符号用"相机在地面之上"消歧（物理上相机挂在机器人本体、在地面之上）。
+        # 不能用 n[2]>0：Pi3X/OpenCV 帧0 系里 +Z 是相机前向(近水平)，该方向符号任意/含噪，
+        # 会把整个场景旋成上下颠倒。改为：法向应指向相机一侧。
+        a, b, c, d = float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])
+        n_ground = np.array([a, b, c], dtype=np.float64)
+        cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
+        mean_signed = float(np.mean(cam_centers @ n_ground + d))  # 相机相对平面平均有符号距离
+        if mean_signed < 0:
+            n_ground = -n_ground
+        n_ground /= max(np.linalg.norm(n_ground), 1e-12)
+        tilt_before = float(np.degrees(np.arccos(np.clip(n_ground[2], -1.0, 1.0))))
+        inlier_frac = len(inliers) / max(pcd64.shape[0], 1)
+        print(
+            f"[gravity] ground plane normal={n_ground.tolist()} "
+            f"inlier_frac={inlier_frac:.3f} tilt vs +Z = {tilt_before:.2f} deg"
+        )
+        if inlier_frac < 0.05:
+            raise ValueError(
+                f"[gravity] ground RANSAC inlier_frac too low ({inlier_frac:.3f}); "
+                f"cannot estimate gravity reliably"
+            )
+
+        target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        axis = np.cross(n_ground, target)
+        s_axis = float(np.linalg.norm(axis))
+        c_axis = float(np.dot(n_ground, target))
+        pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
+
+        cp = np.asarray(camera_pose, dtype=np.float64).copy()
+        if s_axis <= 1e-6:
+            # 已与 +Z 对齐（反向情形上面已翻正）；无需旋转
+            R_grav = np.eye(3, dtype=np.float64)
+        else:
+            k_unit = axis / s_axis
+            K_skew = np.array(
+                [[0.0, -k_unit[2], k_unit[1]],
+                 [k_unit[2], 0.0, -k_unit[0]],
+                 [-k_unit[1], k_unit[0], 0.0]],
+                dtype=np.float64,
+            )
+            R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+
+        pcd_rot = (R_grav @ (pcd64 - pivot).T).T + pivot
+        cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
+        cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
+
+        # 旋转后复测地面：验证 tilt，并取地面 z 电平 ground_z（地面水平后处处同 z）。
+        o3d_pcd2 = o3d.geometry.PointCloud()
+        o3d_pcd2.points = o3d.utility.Vector3dVector(pcd_rot)
+        plane2, _ = o3d_pcd2.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        c2 = float(plane2[2])
+        if abs(c2) < 1e-6:
+            raise ValueError(
+                f"[gravity] post-correction ground plane not horizontal (c2={c2:.3e}); "
+                f"gravity alignment failed"
+            )
+        ground_z = float(-float(plane2[3]) / c2)  # 平面 a x+b y+c z+d=0 在水平时的 z 电平
+        n2 = np.asarray(plane2[:3], dtype=np.float64)
+        n2 /= max(np.linalg.norm(n2), 1e-12)
+        if n2[2] < 0:
+            n2 = -n2
+        tilt_after = float(np.degrees(np.arccos(np.clip(n2[2], -1.0, 1.0))))
+        print(
+            f"[gravity] post-correction ground tilt vs +Z = {tilt_after:.2f} deg, "
+            f"ground_z = {ground_z:.3f}"
+        )
+        return (
+            pcd_rot.astype(np.float32),
+            cp.astype(np.float32),
+            tilt_before,
+            tilt_after,
+            ground_z,
+        )
+
+    def align_to_world(self, pcd):
+        """GT-free 把 Pi3X 重建对齐到真实世界系（z 朝上、帧 0 规范原点/朝向）。
+
+        与 ``align_with_gt_scale`` 不同：不读任何 GT odom。依据：
+          - 尺度：直接信任 Pi3X metric_head（已实验验证），外加 config 可选修正系数
+            ``self.metric_scale_correction``（默认 1.0）。
+          - 重力(roll/pitch)：地面 RANSAC 估法向 -> +Z（_gravity_align_to_z）。
+            注意 Pi3X 世界系锚定帧 0 相机(OpenCV)，相机已在该坐标系，故地面法向
+            即可恢复全局重力，无需GT。
+          - 原点/朝向(yaw)：帧 0 规范——原点取**帧 0 相机正下方的地面**（x,y=帧0相机、z=地面电平），
+            使地面 z=0、相机在 +高度(~0.6)、重建点云多为正值（符合"本体在地面上"）；
+            绕 +Z 旋转使帧 0 前向投影到 +X。OCC 为 ego 系、对全局 yaw/平移不变，此步仅为
+            全局可视化与落盘位姿的确定性。
+
+        就地更新 self.pcd / self.camera_pose；返回 (pcd_aligned, scale)。
+        """
+        if self.camera_pose is None or len(self.camera_pose) == 0:
+            raise ValueError("[align_to_world] camera_pose is empty")
+
+        pcd_np = np.asarray(pcd, dtype=np.float64)
+        cp = np.asarray(self.camera_pose, dtype=np.float64).copy()
+
+        # 1) 尺度（config 可选修正系数；默认 1.0 = 直接信任 metric_head）
+        s = float(self.metric_scale_correction)
+        if not np.isfinite(s) or s <= 0:
+            raise ValueError(f"[align_to_world] invalid metric_scale_correction: {s}")
+        pcd_np = pcd_np * s
+        cp[:, :3, 3] = cp[:, :3, 3] * s
+
+        # 2) 重力对齐（绕帧 0）
+        pivot = cp[0, :3, 3].copy()
+        pcd_g, cp_g, tilt_b, tilt_a, ground_z = self._gravity_align_to_z(
+            pcd_np, cp, pivot
+        )
+        pcd_np = np.asarray(pcd_g, dtype=np.float64)
+        cp = np.asarray(cp_g, dtype=np.float64)
+
+        # 3) yaw 规范：帧 0 前向(OpenCV z 轴在世界系)投影到 XY，旋到 +X
+        pivot = cp[0, :3, 3].copy()
+        fwd = cp[0, :3, 2].copy()
+        fwd[2] = 0.0
+        fwd_norm = float(np.linalg.norm(fwd))
+        if fwd_norm > 1e-6:
+            fwd /= fwd_norm
+            yaw = float(np.arctan2(fwd[1], fwd[0]))
+            c, sN = np.cos(-yaw), np.sin(-yaw)
+            Rz = np.array(
+                [[c, -sN, 0.0], [sN, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+            )
+            pcd_np = (Rz @ (pcd_np - pivot).T).T + pivot
+            cp[:, :3, 3] = (Rz @ (cp[:, :3, 3] - pivot).T).T + pivot
+            cp[:, :3, :3] = np.einsum("ij,tjk->tik", Rz, cp[:, :3, :3])
+
+        # 4) 原点：x,y 取帧 0 相机、z 取地面电平 -> 地面 z=0、相机在 +高度、点云多为正
+        origin = np.array(
+            [cp[0, 0, 3], cp[0, 1, 3], ground_z], dtype=np.float64
+        )
+        pcd_np = pcd_np - origin
+        cp[:, :3, 3] = cp[:, :3, 3] - origin
+
+        pcd_aligned = pcd_np.astype(np.float32)
+        self.pcd = pcd_aligned
+        self.camera_pose = cp.astype(np.float32)
+        cam0_h = float(cp[0, 2, 3])
+        print(
+            f"[align_to_world] GT-free: scale={s:.4f}, ground tilt "
+            f"{tilt_b:.2f}->{tilt_a:.2f} deg, origin->frame-0 foot on ground "
+            f"(ground z=0, cam0 height={cam0_h:.3f} m), yaw canonicalized."
+        )
+        return pcd_aligned, s
+
     def update_metadata(
         self, paths, all_camera_poses, all_camera_intrinsics, input_path
     ):
@@ -842,10 +1015,11 @@ class InternNavDataGenerator(DataGenerator):
             input_path, condit_depth_path, intrinsics_np
         )
 
-        # Align with Ground Truth Scale
-        # self.camera_pose and pcd are updated to the aligned scale here
-        pcd, scale = self.align_with_gt_scale(input_path, pcd)
-        print(f"[Scale Info] Aligned with target scale: {scale:.4f}")
+        # GT-free 世界系对齐：尺度信任 metric_head(+config 修正)，重力来自地面RANSAC估计，
+        # 原点/朝向取帧 0 规范。self.camera_pose 与 pcd 在此就地更新。
+        # 旧 align_with_gt_scale / get_gt_poses 保留供离线 GT 诊断，pipeline不再调用。
+        pcd, scale = self.align_to_world(pcd)
+        print(f"[Scale Info] GT-free world alignment, scale={scale:.4f}")
 
         self.update_meta_episodes_jsonl(scale)
 
@@ -854,8 +1028,8 @@ class InternNavDataGenerator(DataGenerator):
         paths = self.get_io_paths(input_path)
 
         # Execute core computation.
-        # ``align_with_gt_scale`` already applied the Sim3 transform to self.pcd and
-        # self.camera_pose, so the OCC/voxel stage must NOT re-scale (pass scale=1.0).
+        # ``align_to_world`` already applied scale to self.pcd and self.camera_pose,
+        # so the OCC/voxel stage must NOT re-scale (pass scale=1.0).
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(
                 pcd, mesh=mesh, T_cam2base=T_cam2base, scale=1.0
