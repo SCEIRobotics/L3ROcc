@@ -525,7 +525,7 @@ class InternNavDataGenerator(DataGenerator):
             # P6: ground-plane RANSAC on aligned pcd, report tilt vs world Z.
             # P7: when tilt > threshold, apply Rodrigues gravity correction so the
             # dominant ground plane normal aligns with +Z (compensates the Unitree odom
-            # Z-axis vs absolute gravity offset — see plan §3/§4.3).
+            # Z-axis vs absolute gravity offset).
             tilt_pcd_deg = float("nan")
             try:
                 import open3d as _o3d
