@@ -37,10 +37,10 @@ demo_gradio.py
 example.py
 pyproject.toml
 
-/tools/exp_scale/exp_out
-/tools/exp_intrinsic/exp_out
-/tools/exp_metric_scale/exp_out
+**/exp_out/
+
 /.claude
 .zed/
 /tools/run_bash
 /tools/exp_sum
+/tools/run_exp_bash

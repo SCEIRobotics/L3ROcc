@@ -39,6 +39,9 @@ from third_party.pi3.pi3.utils.basic import (  # Assuming you have a helper func
 # from pi3.utils.geometry import homogenize_points
 from third_party.pi3.pi3.utils.geometry import depth_edge
 
+# 该常量用于把 OpenCV 相机系换基到 OpenGL 渲染相机系: p_render = C @ p_opencv。
+R_OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+
 
 class DataGenerator:
     """
@@ -954,6 +957,15 @@ class DataGenerator:
         total_frames = len(self.camera_pose)
         grid_dims = self.config["occ_size"]  # (H, W, D)
         device = self.device
+
+        # OpenCV(Pi3X 相机系) -> OpenGL(T_cam2base 标定所用的渲染相机系) 换基: 把 C=R_OPENCV_TO_OPENGL
+        # 折进 T_cam2base 的旋转 (R_eff = R_c2b @ C)。这样后续所有走 R_c2b 的 camera->base 变换 ——
+        # 点云 (convert_pointcloud_camera_to_base)、末帧相机轨迹、以及 check_visual_occ 的可见性射线
+        # (norm_cam_ray @ R_c2b.T) —— 都会一致地先换基再到 base，消除 base/OCC 绕 X 轴的整体翻转。
+        # 仅在提供物理相机外参时生效 (normal_data 路径 T_cam2base=None, 不触发)。复制以免改动调用方数组。
+        if T_cam2base is not None:
+            T_cam2base = np.asarray(T_cam2base, dtype=np.float32).copy()
+            T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
 
         # Lists for storage
         all_sparse_indices_occ = []
