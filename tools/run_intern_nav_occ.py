@@ -241,7 +241,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_intrinsic",
         type=_parse_bool,
-        default=True,
+        default=False,
         metavar="true|false",
         help="Use a calibrated K. When true: (1) the loader reads K from parquet's "
         "observation.camera_intrinsic if present, otherwise falls back to the "
@@ -270,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--overwrite",
         type=_parse_bool,
-        default=True,
+        default=False,
         metavar="true|false",
         help="Overwrite existing files even when artifacts look complete. Default: false.",
     )

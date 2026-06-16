@@ -625,18 +625,17 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Scale Error] Exception during alignment: {e}")
             return pcd, 1.0
 
-    def _gravity_align_to_z(self, pcd, camera_pose, pivot):
-        """用地面 RANSAC 估重力方向，构造把地面法向转到 +Z 的 Rodrigues 旋转，绕 pivot
-        同步旋转点云与相机位姿。
+    def _gravity_R_to_z(self, pcd, cam_centers):
+        """地面 RANSAC 估法向，用"相机在地面之上"消歧符号，返回把地面法向转到 +Z 的 Rodrigues
+        旋转 R_grav 与纠前 tilt（度）。被 ``_gravity_align_to_z``（world 系）与
+        ``_fold_gravity_into_tcam2base``（base 系）复用。
 
         Args:
-            pcd : (N, 3) 点云（将被旋转）
-            camera_pose : (T, 4, 4) 相机位姿（将被旋转）
-            pivot : (3,) 旋转中心（通常帧 0 相机位置）
+            pcd : (N, 3) 点云
+            cam_centers : (T, 3) 相机中心（用于法向符号消歧）
 
         Returns:
-            (pcd_rot (N,3) f32, camera_pose_rot (T,4,4) f32, tilt_before_deg,
-             tilt_after_deg, ground_z)  —— ground_z 为旋转后地面在世界系的 z 电平
+            (R_grav (3,3) f64, tilt_before_deg)
         """
         import open3d as o3d
 
@@ -656,8 +655,8 @@ class InternNavDataGenerator(DataGenerator):
         # 会把整个场景旋成上下颠倒。改为：法向应指向相机一侧。
         a, b, c, d = float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])
         n_ground = np.array([a, b, c], dtype=np.float64)
-        cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
-        mean_signed = float(np.mean(cam_centers @ n_ground + d))  # 相机相对平面平均有符号距离
+        cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+        mean_signed = float(np.mean(cc @ n_ground + d))  # 相机相对平面平均有符号距离
         if mean_signed < 0:
             n_ground = -n_ground
         n_ground /= max(np.linalg.norm(n_ground), 1e-12)
@@ -677,9 +676,6 @@ class InternNavDataGenerator(DataGenerator):
         axis = np.cross(n_ground, target)
         s_axis = float(np.linalg.norm(axis))
         c_axis = float(np.dot(n_ground, target))
-        pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
-
-        cp = np.asarray(camera_pose, dtype=np.float64).copy()
         if s_axis <= 1e-6:
             # 已与 +Z 对齐（反向情形上面已翻正）；无需旋转
             R_grav = np.eye(3, dtype=np.float64)
@@ -692,7 +688,60 @@ class InternNavDataGenerator(DataGenerator):
                 dtype=np.float64,
             )
             R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+        return R_grav, tilt_before
 
+    def _fold_gravity_into_tcam2base(self, pcd, T_cam2base):
+        """Lerobot(实采, OpenCV 外参) 专用：复现实验的 base 系 Z 倾斜重力纠偏并**折进外参旋转**。
+
+        在帧0 base 系（world->cam0->base，Lerobot 约定 C=identity）估计把地面法向转到 +Z 的 R_deskew，
+        折进 ``T_cam2base`` 旋转（R_eff = R_deskew @ R_c2b），从而对**所有帧**一致地纠正 OCC/base 的轻微下倾，
+        与 exp_coord_align 帧0 结果逐点一致。绕 base 原点（=帧0相机）旋转，保持轨迹起点不动。
+        失败（点太少 / RANSAC 不可靠）则告警并原样返回，跳过纠偏。
+        """
+        try:
+            cam0 = self.camera_pose[0]
+            p_base0 = self.convert_pointcloud_camera_to_base(
+                self.convert_pointcloud_world_to_camera(pcd, cam0), T_cam2base
+            )
+            cc_base0 = self.convert_pointcloud_camera_to_base(
+                self.convert_pointcloud_world_to_camera(
+                    np.asarray(self.camera_pose)[:, :3, 3], cam0
+                ),
+                T_cam2base,
+            )
+            R_deskew, tilt_before = self._gravity_R_to_z(p_base0, cc_base0)
+        except Exception as e:
+            print(f"[gravity-base] lerobot Z-tilt deskew skipped: {e}")
+            return T_cam2base
+        T_eff = np.asarray(T_cam2base, dtype=np.float32).copy()
+        T_eff[:3, :3] = (R_deskew @ T_eff[:3, :3].astype(np.float64)).astype(np.float32)
+        print(
+            f"[gravity-base] lerobot Z-tilt deskew folded into T_cam2base: "
+            f"tilt {tilt_before:.2f} deg -> ~0"
+        )
+        return T_eff
+
+    def _gravity_align_to_z(self, pcd, camera_pose, pivot):
+        """用地面 RANSAC 估重力方向，构造把地面法向转到 +Z 的 Rodrigues 旋转，绕 pivot
+        同步旋转点云与相机位姿。
+
+        Args:
+            pcd : (N, 3) 点云（将被旋转）
+            camera_pose : (T, 4, 4) 相机位姿（将被旋转）
+            pivot : (3,) 旋转中心（通常帧 0 相机位置）
+
+        Returns:
+            (pcd_rot (N,3) f32, camera_pose_rot (T,4,4) f32, tilt_before_deg,
+             tilt_after_deg, ground_z)  —— ground_z 为旋转后地面在世界系的 z 电平
+        """
+        import open3d as o3d
+
+        pcd64 = np.asarray(pcd, dtype=np.float64)
+        cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
+        R_grav, tilt_before = self._gravity_R_to_z(pcd64, cam_centers)
+        pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
+
+        cp = np.asarray(camera_pose, dtype=np.float64).copy()
         pcd_rot = (R_grav @ (pcd64 - pivot).T).T + pivot
         cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
         cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
@@ -1019,21 +1068,28 @@ class InternNavDataGenerator(DataGenerator):
             input_path, condit_depth_path, intrinsics_np
         )
 
-        # GT-free 世界系对齐：尺度信任 metric_head(+config 修正)，重力来自地面RANSAC估计，
-        # 原点/朝向取帧 0 规范。self.camera_pose 与 pcd 在此就地更新。
-        # 旧 align_with_gt_scale / get_gt_poses 保留供离线 GT 诊断，pipeline不再调用。
-        pcd, scale = self.align_to_world(pcd)
-        print(f"[Scale Info] GT-free world alignment, scale={scale:.4f}")
+        # 不再用 align_to_world 做坐标对齐（与 exp_coord_align 一致）：坐标对齐由 compute_sequence_data
+        # 的相机约定换基 C（按 extrinsic_convention：N1=OpenGL 折 diag(1,-1,-1)、lerobot=OpenCV 不翻转）完成。
+        # 尺度：信任 metric_head + config 修正系数（沿用 align_to_world 的尺度处理，就地缩放 pcd 与相机平移）。
+        # 旧 align_to_world / align_with_gt_scale / get_gt_poses 保留供离线 GT 诊断，pipeline 不再调用。
+        s = float(self.metric_scale_correction)
+        pcd = pcd * s
+        self.pcd = pcd
+        self.camera_pose[:, :3, 3] = self.camera_pose[:, :3, 3] * s
+        print(f"[Scale Info] no align_to_world; scale={s:.4f} (metric_scale_correction)")
 
-        self.update_meta_episodes_jsonl(scale)
+        # Lerobot(实采, OpenCV 外参)：仅对 Z 轴轻微下倾做重力纠偏，把地面法向->+Z 的 R_deskew
+        # 折进 T_cam2base(base 系)，对所有帧一致纠偏。N1(OpenGL) 不纠偏。
+        if extrinsic_convention == "opencv" and T_cam2base is not None:
+            T_cam2base = self._fold_gravity_into_tcam2base(pcd, T_cam2base)
+
+        self.update_meta_episodes_jsonl(s)
 
         print("Start processing sequence frames...")
 
         paths = self.get_io_paths(input_path)
 
-        # Execute core computation.
-        # ``align_to_world`` already applied scale to self.pcd and self.camera_pose,
-        # so the OCC/voxel stage must NOT re-scale (pass scale=1.0).
+        # Execute core computation. 尺度已就地施加到 pcd / camera_pose，故 OCC/voxel 阶段不再缩放(scale=1.0)。
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(
                 pcd,

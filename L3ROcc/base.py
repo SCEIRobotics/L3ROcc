@@ -191,7 +191,7 @@ class DataGenerator:
             tuple:
                 - pcd : The reconstructed point cloud (N, 3).
                 - camera_pose : The estimated camera extrinsics (T, 4, 4).
-                - norm_cam_ray ): Normalized camera ray directions (H*W, 3).
+                - norm_cam_ray : Normalized camera ray directions (H*W, 3).
         """
         # Load all frames, resize to uniform size, and convert to Tensor [N, 3, H, W].
         # When model_type='pi3x', also build the depth / intrinsic conditions for Pi3X.
