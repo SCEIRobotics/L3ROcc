@@ -985,6 +985,7 @@ class InternNavDataGenerator(DataGenerator):
         overwrite=False,
         mesh=False,
         T_cam2base=None,
+        extrinsic_convention=None,
     ):
         """
         Executes the full data generation pipeline:
@@ -1002,6 +1003,9 @@ class InternNavDataGenerator(DataGenerator):
             overwrite (bool, optional): Whether to overwrite existing files. Defaults to False.
             mesh (bool, optional): Whether to use mesh instead of origin point cloud. Defaults to False.
             T_cam2base (np.ndarray, optional): 4x4 transformation matrix from camera to base coordinate system. Defaults to None.
+            extrinsic_convention (str, optional): ``T_cam2base`` 的相机约定，决定 OpenCV(Pi3X)->外参约定
+                的换基：``"opengl"``(N1 渲染外参) 施加 C=diag(1,-1,-1)；``"opencv"``(lerobot 实采手眼) / None
+                不翻转。由 ``InternNavSequenceLoader.get_trajectory_info`` 产出并透传。Defaults to None.
 
         Returns:
             None
@@ -1032,7 +1036,11 @@ class InternNavDataGenerator(DataGenerator):
         # so the OCC/voxel stage must NOT re-scale (pass scale=1.0).
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(
-                pcd, mesh=mesh, T_cam2base=T_cam2base, scale=1.0
+                pcd,
+                mesh=mesh,
+                T_cam2base=T_cam2base,
+                scale=1.0,
+                extrinsic_convention=extrinsic_convention,
             )
         )
 

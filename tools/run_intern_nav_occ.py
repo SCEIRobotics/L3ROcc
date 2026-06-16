@@ -116,7 +116,7 @@ def run_dataset_pipeline(args):
     for i in range(len(loader)):
         try:
             # A. Retrieve info from the loader (returns depth_path between video and intrinsic)
-            video_path, depth_path, cam_intrinsics, cam_extrinsics = (
+            video_path, depth_path, cam_intrinsics, cam_extrinsics, cam_convention = (
                 loader.get_trajectory_info(i)
             )
 
@@ -192,6 +192,7 @@ def run_dataset_pipeline(args):
                 overwrite=overwrite,
                 mesh=mesh,
                 T_cam2base=cam_extrinsics,
+                extrinsic_convention=cam_convention,
             )
 
             print("Processing successful!")

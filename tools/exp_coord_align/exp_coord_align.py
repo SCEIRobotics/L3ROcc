@@ -29,14 +29,23 @@
 - camera->base 仅用旋转（与生产 convert_pointcloud_camera_to_base 一致）。
 - 不叠加 align_to_world 结果，只展示未优化结果。
 
-相机约定翻转修正（C，OpenCV<->OpenGL）
--------------------------------------
-Pi3X 相机系是 OpenCV (X-right, Y-down, Z-forward)，N1 action/T_cam2base 是 3D-Front 渲染相机的
-OpenGL 约定 (X-right, Y-up, Z-back)，两者相差 C=R_OPENCV_TO_OPENGL=diag(1,-1,-1)（翻转 Y、Z = 绕
-相机 X 轴 180°）。不换基会使 base 系 Pi3X 与 GT 整体绕 X 轴翻转(且 Z 朝下)。
-本实验对 Pi3X 数据应用 C（fixed），对 N1 action 不应用，并同时输出未修正(raw)、修正前后误差
-(pos_err_*_raw/_fixed)。
-生产Pipeline已在 L3ROcc/base.py 同步修复（把 C 加入 compute_sequence_data 的 T_cam2base 中）。
+相机约定换基（C，按数据集区分 OpenCV/OpenGL）
+---------------------------------------------
+Pi3X 相机系是 OpenCV (X-right, Y-down, Z-forward)。外参 T_cam2base 的相机约定按数据集不同：
+  - InternData-N1（3D-Front 渲染）: action/camera_extrinsic 是 OpenGL (Y-up, Z-back)，
+    需 C=R_OPENCV_TO_OPENGL=diag(1,-1,-1)（翻转 Y、Z = 绕相机 X 轴 180°）。不换基会绕 X 轴整体翻转。
+  - Lerobot（实采，手眼 R_cam2gripper）: 是 OpenCV (Y-down，与 Pi3X 一致)，C=identity（**不翻转**）。
+约定 `extrinsic_convention` 由 InternNavSequenceLoader.get_trajectory_info 透传（opengl/opencv/None）。
+本实验对 Pi3X 按该约定的期望 C 修正（fixed），GT 不换基，并输出未修正(raw)、修正前后误差
+(pos_err_*_raw/_fixed)、以及“经验 R_fix 自检”护栏（Kabsch 反求 C_emp 与该数据集期望 C 对比）。
+生产Pipeline已在 L3ROcc/base.py 同步修复（compute_sequence_data 按 extrinsic_convention 仅对 opengl 折 C）。
+
+重力倾斜纠偏（--no_gravity_align 关闭，默认开）
+--------------------------------------------
+Pi3X 重建在 base 系常有轻微 z 倾斜（地面不水平，实测约 4.7°）。**仅参照** align_to_world：复用生产
+``InternNavDataGenerator._gravity_align_to_z``（地面 RANSAC→法向→+Z，绕 base 原点旋转），只纠倾斜，
+不做 align_to_world 的尺度/yaw/原点。仅对 Pi3X fixed 数据(scene+traj)、且有真实 base 外参时生效；
+GT 与 raw 不纠偏(raw 留作 before 对照)。metrics 记 gravity_tilt_before/after_deg。
 
 用法
 ----
@@ -124,10 +133,19 @@ def world_to_base_via_frame0(gen, points_world, T0_cam2world, T_cam2base, conven
     return np.asarray(pts_base, dtype=np.float64)
 
 
-def kabsch_rfix(traj_pi3x_raw, traj_gt, T_cam2base):
+def expected_convention_C(convention):
+    """该数据集**期望**的相机约定换基 C（OpenCV Pi3X -> 外参约定）：
+    "opengl"(N1 渲染外参) -> diag(1,-1,-1)；"opencv"(lerobot 实采) / None -> identity（不翻转）。"""
+    if convention == "opengl":
+        return np.asarray(R_OPENCV_TO_OPENGL, dtype=np.float64)
+    return np.eye(3, dtype=np.float64)
+
+
+def kabsch_rfix(traj_pi3x_raw, traj_gt, T_cam2base, convention):
     """护栏：从未修正的 Pi3X base 轨迹与 GT base 轨迹做 Kabsch，反求 base 系修正旋转 E
-    (pi3x_raw -> gt)，并换回相机系 C_emp = R_c2bᵀ · E · R_c2b，与几何常量 C=R_OPENCV_TO_OPENGL 对比。
-    返回 dict：经验 E、C_emp 对角、det、是否匹配、应用 E 后的相对残差。防止再次用错常量。
+    (pi3x_raw -> gt)，并换回相机系 C_emp = R_c2bᵀ · E · R_c2b，与**该数据集期望的** C 对比
+    （N1=diag(1,-1,-1)、lerobot=identity）。返回 dict：经验 E、C_emp 对角、是否匹配、残差。
+    防止用错常量（如对 lerobot 误施加翻转）。
     """
     if traj_gt is None or len(traj_gt) < 3:
         return None
@@ -142,7 +160,10 @@ def kabsch_rfix(traj_pi3x_raw, traj_gt, T_cam2base):
     resid = float(
         np.linalg.norm((E @ Pc.T).T - Qc) / (np.linalg.norm(Qc) + 1e-9)
     )
+    C_expected = expected_convention_C(convention)
     out = {
+        "expected_convention": convention,
+        "expected_C_diag": np.diag(C_expected).tolist(),
         "kabsch_det_raw": det_raw,
         "R_fix_base": E.tolist(),
         "R_fix_base_diag": np.diag(E).round(3).tolist(),
@@ -151,11 +172,47 @@ def kabsch_rfix(traj_pi3x_raw, traj_gt, T_cam2base):
     if T_cam2base is not None:
         R_c2b = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
         C_emp = R_c2b.T @ E @ R_c2b
-        C = np.asarray(R_OPENCV_TO_OPENGL, dtype=np.float64)
         out["C_emp_diag"] = np.diag(C_emp).round(3).tolist()
-        out["c_matches_empirical"] = bool(np.allclose(C_emp, C, atol=0.2))
-        out["C_emp_frob_diff_to_const"] = float(np.linalg.norm(C_emp - C))
+        out["c_matches_empirical"] = bool(np.allclose(C_emp, C_expected, atol=0.2))
+        out["C_emp_frob_diff_to_expected"] = float(np.linalg.norm(C_emp - C_expected))
     return out
+
+
+def gravity_deskew_base(gen, pcd_base, traj_base):
+    """仅参照 align_to_world：用地面 RANSAC 把 Pi3X 在 base 系的轻微 z 倾斜纠偏（地面法向→+Z）。
+    直接复用生产方法 ``InternNavDataGenerator._gravity_align_to_z``（绕原点旋转点云+轨迹），不做
+    align_to_world 的尺度/yaw/原点等其余步骤。绕 base 原点(=帧0相机)旋转，保持与 GT 起点对齐。
+
+    返回 (pcd_base_rot, traj_base_rot, info)；失败时原样返回并 info["gravity_applied"]=False。
+    """
+    info = {"gravity_applied": False}
+    pcd_base = np.asarray(pcd_base, dtype=np.float64)
+    traj_base = np.asarray(traj_base, dtype=np.float64)
+    if pcd_base.shape[0] < 100:
+        info["gravity_skip_reason"] = f"too_few_points({pcd_base.shape[0]})"
+        return pcd_base, traj_base, info
+    # 构造 cp：单位旋转、平移=轨迹点（_gravity_align_to_z 用其相机中心做法向消歧并同步旋转）。
+    cp = np.tile(np.eye(4, dtype=np.float64), (len(traj_base), 1, 1))
+    cp[:, :3, 3] = traj_base
+    pivot = np.zeros(3, dtype=np.float64)  # base 原点 = 帧0相机
+    try:
+        pcd_rot, cp_rot, tilt_b, tilt_a, ground_z = gen._gravity_align_to_z(
+            pcd_base, cp, pivot
+        )
+    except Exception as e:
+        info["gravity_skip_reason"] = f"ransac_failed: {e}"
+        return pcd_base, traj_base, info
+    info.update(
+        gravity_applied=True,
+        gravity_tilt_before_deg=float(tilt_b),
+        gravity_tilt_after_deg=float(tilt_a),
+        gravity_ground_z=float(ground_z),
+    )
+    return (
+        np.asarray(pcd_rot, dtype=np.float64),
+        np.asarray(cp_rot, dtype=np.float64)[:, :3, 3],
+        info,
+    )
 
 
 # =====================================================================================
@@ -181,12 +238,11 @@ def _traj_vs_gt(traj_pi3x, traj_gt):
 
 
 def compute_metrics(traj_pi3x_fixed, traj_pi3x_raw, traj_gt, pcd_base):
-    """度量。同时报告相机约定修正前(raw, convention_fix=None)与修正后(fixed, C=R_OPENCV_TO_OPENGL)
-    的 Pi3X↔GT 误差，量化 ``C`` 是否消除了绕 X 轴翻转。"""
+    """度量。同时报告相机约定修正前(raw, 不换基)与修正后(fixed, 按数据集 C：N1=diag(1,-1,-1)、
+    lerobot=identity)的 Pi3X↔GT 误差。lerobot 下 fixed≈raw（无需翻转即对齐）。"""
     M = {}
     M["n_frames_pi3x"] = int(len(traj_pi3x_fixed))
     M["n_frames_gt"] = int(len(traj_gt)) if traj_gt is not None else 0
-    M["convention_fix_diag"] = np.diag(R_OPENCV_TO_OPENGL).tolist()
     if pcd_base is not None and len(pcd_base) > 0:
         M["pcd_num"] = int(len(pcd_base))
         M["pcd_bbox_min"] = pcd_base.min(0).tolist()
@@ -267,7 +323,9 @@ def plot_compare(traj_pi3x_fixed, traj_pi3x_raw, traj_gt, pcd_base, out_png, tit
 # 单条轨迹处理
 # =====================================================================================
 def process_trajectory(gen, loader, idx, args):
-    video_path, depth_path, cam_intrinsics, T_cam2base = loader.get_trajectory_info(idx)
+    video_path, depth_path, cam_intrinsics, T_cam2base, convention = (
+        loader.get_trajectory_info(idx)
+    )
     if video_path is None:
         print(f"[skip] trajectory {idx}: 无 RGB 视频")
         return None
@@ -281,6 +339,7 @@ def process_trajectory(gen, loader, idx, args):
 
     print(f"\n=== [{idx}] {label} ===")
     print(f"  video: {video_path}")
+    print(f"  extrinsic_convention = {convention} (opengl=N1需翻转 / opencv=lerobot不翻转)")
     if T_cam2base is None:
         print("  [warn] 无 observation.camera_extrinsic / 手眼外参，T_cam2base=None -> base 等同帧0相机系。")
 
@@ -303,14 +362,15 @@ def process_trajectory(gen, loader, idx, args):
     gt_poses = gen.get_gt_poses(video_path)
 
     # --- 3) 未优化坐标变换：world -> 帧0相机系 -> base ---
-    # Pi3X 是 OpenCV 相机系，需用 C=R_OPENCV_TO_OPENGL 换基到 N1 OpenGL 渲染相机系（fixed）；
-    # 不换基则绕 X 轴翻转（raw）。N1 action 本就是 OpenGL 约定，不换基。
+    # Pi3X 是 OpenCV 相机系；按数据集期望的约定换基（fixed）：N1=OpenGL→C=diag(1,-1,-1)，
+    # lerobot=OpenCV→C=identity（不翻转）。raw 恒为不换基，作对照。N1 action / lerobot GT 不换基。
+    C_fix = expected_convention_C(convention)  # N1=diag(1,-1,-1) / lerobot=identity
     T0_p = cam_pose_world[0]
     pcd_base = world_to_base_via_frame0(
-        gen, pcd_world, T0_p, T_cam2base, convention_fix=R_OPENCV_TO_OPENGL
+        gen, pcd_world, T0_p, T_cam2base, convention_fix=C_fix
     )
     traj_pi3x_base_fixed = world_to_base_via_frame0(
-        gen, cam_pose_world[:, :3, 3], T0_p, T_cam2base, convention_fix=R_OPENCV_TO_OPENGL
+        gen, cam_pose_world[:, :3, 3], T0_p, T_cam2base, convention_fix=C_fix
     )
     traj_pi3x_base_raw = world_to_base_via_frame0(
         gen, cam_pose_world[:, :3, 3], T0_p, T_cam2base, convention_fix=None
@@ -325,6 +385,22 @@ def process_trajectory(gen, loader, idx, args):
         )
     else:
         print("  [warn] 无 GT action 轨迹，仅输出 Pi3X 两套数据。")
+
+    # --- 3b) 重力倾斜纠偏（仅 Pi3X fixed；参照 align_to_world 的 _gravity_align_to_z）---
+    # 仅当有真实 base 系(z-up)外参时纠偏；GT/raw 不动。raw 保留倾斜态作 before 对照。
+    grav_info = {"gravity_applied": False}
+    if (not args.no_gravity_align) and T_cam2base is not None:
+        pcd_base, traj_pi3x_base_fixed, grav_info = gravity_deskew_base(
+            gen, pcd_base, traj_pi3x_base_fixed
+        )
+        if grav_info.get("gravity_applied"):
+            print(
+                f"  gravity deskew: tilt {grav_info['gravity_tilt_before_deg']:.2f}"
+                f" -> {grav_info['gravity_tilt_after_deg']:.2f} deg, "
+                f"ground_z={grav_info['gravity_ground_z']:.3f}"
+            )
+        else:
+            print(f"  [warn] gravity deskew skipped: {grav_info.get('gravity_skip_reason')}")
 
     # --- 4) 落盘可视化产物 ---
     write_ply(pcd_base, pcd_color, os.path.join(out_dir, "scene_base.ply"))
@@ -351,12 +427,14 @@ def process_trajectory(gen, loader, idx, args):
     plot_compare(
         traj_pi3x_base_fixed, traj_pi3x_base_raw, traj_gt_base, pcd_base,
         os.path.join(out_dir, "compare_traj.png"),
-        title=f"{label}  (base frame, no align_to_world; C=OpenCV->OpenGL)",
+        title=f"{label}  (base, no align_to_world; conv={convention}, C_diag={np.diag(C_fix).tolist()})",
     )
 
     # --- 5) 度量 + 经验 R_fix 自检（护栏）---
     M = compute_metrics(traj_pi3x_base_fixed, traj_pi3x_base_raw, traj_gt_base, pcd_base)
-    selfcheck = kabsch_rfix(traj_pi3x_base_raw, traj_gt_base, T_cam2base)
+    M["extrinsic_convention"] = convention
+    M.update(grav_info)  # gravity_applied / gravity_tilt_before/after_deg / gravity_ground_z
+    selfcheck = kabsch_rfix(traj_pi3x_base_raw, traj_gt_base, T_cam2base, convention)
     if selfcheck is not None:
         M["rfix_selfcheck"] = selfcheck
     M["label"] = label
@@ -402,6 +480,11 @@ def main():
     ap.add_argument("--config", default="./L3ROcc/configs/config.yaml")
     ap.add_argument("--no_intrinsic", action="store_true", help="不使用标定内参（回退 DLT 估计）")
     ap.add_argument("--use_depth", action="store_true", help="把公制深度喂入 Pi3X（默认关）")
+    ap.add_argument(
+        "--no_gravity_align",
+        action="store_true",
+        help="关闭 Pi3X base 系重力倾斜纠偏（默认开；参照 align_to_world 的地面RANSAC→+Z，仅纠倾斜）",
+    )
     ap.add_argument("--cpu", action="store_true", help="强制 CPU 推理")
     args = ap.parse_args()
 

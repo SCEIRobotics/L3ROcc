@@ -939,7 +939,9 @@ class DataGenerator:
             )
             print(f"Saved Mask in {time.time() - t_start:.2f}s")
 
-    def compute_sequence_data(self, pcd, mesh=True, T_cam2base=None, scale=1.0):
+    def compute_sequence_data(
+        self, pcd, mesh=True, T_cam2base=None, scale=1.0, extrinsic_convention=None
+    ):
         """
         Computes sequential data for the entire trajectory, including sparse OCC indices
         and compressed visibility masks.
@@ -958,14 +960,17 @@ class DataGenerator:
         grid_dims = self.config["occ_size"]  # (H, W, D)
         device = self.device
 
-        # OpenCV(Pi3X 相机系) -> OpenGL(T_cam2base 标定所用的渲染相机系) 换基: 把 C=R_OPENCV_TO_OPENGL
-        # 折进 T_cam2base 的旋转 (R_eff = R_c2b @ C)。这样后续所有走 R_c2b 的 camera->base 变换 ——
-        # 点云 (convert_pointcloud_camera_to_base)、末帧相机轨迹、以及 check_visual_occ 的可见性射线
-        # (norm_cam_ray @ R_c2b.T) —— 都会一致地先换基再到 base，消除 base/OCC 绕 X 轴的整体翻转。
-        # 仅在提供物理相机外参时生效 (normal_data 路径 T_cam2base=None, 不触发)。复制以免改动调用方数组。
+        # 相机约定换基 (按数据集区分, extrinsic_convention 由 loader 透传):
+        #   - "opengl" (InternData-N1 渲染相机外参): Pi3X 是 OpenCV、外参是 OpenGL, 需把 C=R_OPENCV_TO_OPENGL
+        #     折进 T_cam2base 的旋转 (R_eff = R_c2b @ C); 否则 base/OCC 会绕 X 轴整体翻转。
+        #   - "opencv" (lerobot 实采手眼外参) / None: 外参与 Pi3X 同为 OpenCV, 不翻转 (C=identity)。
+        # 折进 T_cam2base 后, 后续所有走 R_c2b 的 camera->base 变换 —— 点云
+        # (convert_pointcloud_camera_to_base)、末帧相机轨迹、以及 check_visual_occ 的可见性射线
+        # (norm_cam_ray @ R_c2b.T) —— 都一致换基。复制以免改动调用方数组。
         if T_cam2base is not None:
             T_cam2base = np.asarray(T_cam2base, dtype=np.float32).copy()
-            T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
+            if extrinsic_convention == "opengl":
+                T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
 
         # Lists for storage
         all_sparse_indices_occ = []
