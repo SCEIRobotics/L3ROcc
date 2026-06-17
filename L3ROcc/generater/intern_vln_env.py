@@ -32,8 +32,10 @@ class InternNavDataGenerator(DataGenerator):
     """
     Data generator designed for the InternNav dataset.
 
-    This class handles the pipeline of 3D reconstruction, scale alignment against
-    ground truth, occupancy generation, and safe metadata updates using file locking.
+    This class handles the pipeline of 3D reconstruction, metric-scale handling, optional
+    Lerobot z-axis deskew, occupancy generation, and safe metadata updates using file locking.
+    GT-based alignment (``align_with_gt_scale`` / ``align_to_world`` / ``get_gt_poses``) is kept
+    for offline diagnosis only and is not part of the data-processing pipeline.
     """
 
     def __init__(
@@ -670,12 +672,14 @@ class InternNavDataGenerator(DataGenerator):
         return R_grav, tilt_before
 
     def _fold_gravity_into_tcam2base(self, pcd, T_cam2base):
-        """Lerobot-only: fold the base-frame Z-tilt gravity deskew into the extrinsic rotation.
+        """Lerobot z-deskew stage ① (frame-0 gravity fold): fold the base-frame Z-tilt deskew
+        into the extrinsic rotation.
 
         Estimate R_deskew (ground normal -> +Z) in the frame-0 base frame (Lerobot convention
-        C=identity) and fold it as R_eff = R_deskew @ R_c2b, so every frame's OCC/base output is
-        deskewed consistently (matching exp_coord_align's frame-0 result). On RANSAC failure,
-        warn and return T_cam2base unchanged.
+        C=identity) and fold it as R_eff = R_deskew @ R_c2b — a single uniform deskew applied to
+        every frame (matching exp_coord_align's frame-0 result). The residual per-frame drift on
+        later frames is then handled by stage ② (per-frame leveling in ``compute_sequence_data``).
+        On RANSAC failure, warn and return T_cam2base unchanged. Called only when z_deskew is on.
         """
         try:
             cam0 = self.camera_pose[0]
@@ -1077,7 +1081,9 @@ class InternNavDataGenerator(DataGenerator):
     ):
         """
         Executes the full data generation pipeline:
-        Reconstruction -> GT Scale Alignment -> Global Storage -> Sequence Calculation -> Metadata Update
+        Reconstruction -> metric scale (no GT alignment) -> optional Lerobot z-deskew fold ->
+        OCC sequence computation -> save sequence -> metadata update -> optional per-frame
+        deskew parquet -> optional global point cloud save.
 
         Args:
             input_path (str): Path to the input video file.
