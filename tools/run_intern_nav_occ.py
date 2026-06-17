@@ -266,7 +266,7 @@ if __name__ == "__main__":
         default=False,
         metavar="true|false",
         help="Lerobot (opencv) only: enable z-axis tilt deskew (frame-0 fold + per-frame "
-        "leveling) and write per-frame cam->base transforms to "
+        "leveling) and write the per-frame deskew rotation to "
         "data/chunk-000/episode_000000.parquet. Default false. No effect on N1 (opengl).",
     )
 

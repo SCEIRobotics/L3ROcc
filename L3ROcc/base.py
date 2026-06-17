@@ -1252,8 +1252,8 @@ class DataGenerator:
         occ_end = time.time()
         print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
 
-        # Stash per-frame cam->base transforms (4x4) for run_pipeline to persist.
-        # Empty only when T_cam2base is None.
+        # Stash per-frame cam->base transforms (4x4); run_pipeline uses them (with the raw
+        # hand-eye) to derive and persist the per-frame deskew. Empty only when T_cam2base is None.
         if per_frame_T_list:
             self.occ_per_frame_T_cam2base = np.stack(per_frame_T_list).astype(np.float32)
 
