@@ -939,8 +939,145 @@ class DataGenerator:
             )
             print(f"Saved Mask in {time.time() - t_start:.2f}s")
 
+    def _ground_tilt_deg(self, pcd_base):
+        """Diagnostic: RANSAC ground-plane tilt (deg) vs +Z for a base-frame cloud.
+
+        Sign-agnostic; NaN on too-few-points/failure. Read-only profiling, no OCC effect.
+        """
+        try:
+            import open3d as o3d
+
+            pts = np.asarray(pcd_base, dtype=np.float64)
+            if pts.shape[0] < 100:
+                return float("nan")
+            o3d_pcd = o3d.geometry.PointCloud()
+            o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+            plane, _inliers = o3d_pcd.segment_plane(
+                distance_threshold=0.05, ransac_n=3, num_iterations=300
+            )
+            n = np.asarray(plane[:3], dtype=np.float64)
+            n /= max(np.linalg.norm(n), 1e-12)
+            return float(np.degrees(np.arccos(np.clip(abs(n[2]), -1.0, 1.0))))
+        except Exception as e:
+            print(f"[Tilt-diag] per-frame ground RANSAC failed: {e}")
+            return float("nan")
+
+    def _ground_R_to_z(self, pts, cam_centers, min_inlier_frac=0.10):
+        """Per-frame leveling helper: RANSAC the ground of a base-frame cloud and return the
+        Rodrigues rotation (ground normal -> +Z), normal oriented by "camera above ground".
+
+        Returns ``(R (3,3) f64, inlier_frac, tilt_before_deg)`` or ``None`` if unreliable
+        (too few points / inlier_frac < ``min_inlier_frac`` / failure). Quiet and non-raising
+        (unlike the subclass ``_gravity_R_to_z``), so safe to call once per frame.
+        """
+        try:
+            import open3d as o3d
+
+            pts = np.asarray(pts, dtype=np.float64)
+            if pts.shape[0] < 200:
+                return None
+            o3d_pcd = o3d.geometry.PointCloud()
+            o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+            plane, inliers = o3d_pcd.segment_plane(
+                distance_threshold=0.05, ransac_n=3, num_iterations=300
+            )
+            a, b, c, d = plane
+            n = np.array([a, b, c], dtype=np.float64)
+            cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+            if np.mean(cc @ n + d) < 0:  # camera should sit above the ground
+                n = -n
+            n /= max(np.linalg.norm(n), 1e-12)
+            inlier_frac = len(inliers) / max(pts.shape[0], 1)
+            if inlier_frac < min_inlier_frac:
+                return None
+            tilt = float(np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0))))
+            target = np.array([0.0, 0.0, 1.0])
+            axis = np.cross(n, target)
+            s_axis = float(np.linalg.norm(axis))
+            c_axis = float(np.dot(n, target))
+            if s_axis <= 1e-6:
+                return np.eye(3), inlier_frac, tilt
+            k = axis / s_axis
+            K = np.array(
+                [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
+                dtype=np.float64,
+            )
+            R = np.eye(3) + s_axis * K + (1.0 - c_axis) * (K @ K)
+            return R, inlier_frac, tilt
+        except Exception:
+            return None
+
+    def _compute_perframe_leveling(
+        self, pcd_world, camera_poses, T_cam2base, min_inlier_frac=0.10, max_pts=60000
+    ):
+        """Method A — per-frame ego ground leveling with robust fallback.
+
+        Per frame, RANSAC the ground in its base frame and build ``R_level`` (ground normal
+        -> +Z), applied on top of ``T_cam2base``'s rotation. Unreliable frames are filled by
+        SLERP between the nearest reliable frames (ends clamped) to stay temporally smooth.
+        Estimation uses a random subsample of the world cloud (orientation is density- and
+        scale-robust); the OCC loop still voxelizes the full cloud.
+
+        Returns ``(T, 3, 3)`` f64 rotations, or ``None`` if no frame has a reliable ground.
+        """
+        pw = np.asarray(pcd_world, dtype=np.float64)
+        if pw.shape[0] == 0:
+            return None
+        if pw.shape[0] > max_pts:
+            sel = np.random.default_rng(0).choice(pw.shape[0], max_pts, replace=False)
+            pw = pw[sel]
+
+        cps = np.asarray(camera_poses, dtype=np.float64)
+        cam_centers_world = cps[:, :3, 3]
+        Rb = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
+        n_frames = cps.shape[0]
+
+        R_level = np.repeat(np.eye(3)[None], n_frames, axis=0)
+        good = np.zeros(n_frames, dtype=bool)
+        tilts = []
+        for i in range(n_frames):
+            p_cam = self.convert_pointcloud_world_to_camera(pw, cps[i])
+            p_base = np.asarray(p_cam, dtype=np.float64) @ Rb.T
+            cc_cam = self.convert_pointcloud_world_to_camera(cam_centers_world, cps[i])
+            cc_base = np.asarray(cc_cam, dtype=np.float64) @ Rb.T
+            res = self._ground_R_to_z(p_base, cc_base, min_inlier_frac=min_inlier_frac)
+            if res is not None:
+                R_level[i], _frac, _tilt = res
+                good[i] = True
+                tilts.append(_tilt)
+
+        n_good = int(good.sum())
+        if n_good == 0:
+            print(
+                "[level] per-frame leveling: no frame had a reliable ground plane; "
+                "keeping the frame-0 fold only."
+            )
+            return None
+
+        ks = np.where(good)[0]
+        if ks.size == 1:
+            R_level[:] = R_level[ks[0]]  # single keyframe -> constant rotation
+        else:
+            from scipy.spatial.transform import Rotation, Slerp
+
+            slerp = Slerp(ks, Rotation.from_matrix(R_level[ks]))
+            q = np.clip(np.arange(n_frames), ks[0], ks[-1])
+            R_level = slerp(q).as_matrix()
+        print(
+            f"[level] per-frame leveling (Method A): {n_good}/{n_frames} frames had a "
+            f"reliable ground (mean pre-level tilt {np.mean(tilts):.2f} deg); "
+            f"{n_frames - n_good} filled by SLERP/clamp."
+        )
+        return R_level
+
     def compute_sequence_data(
-        self, pcd, mesh=True, T_cam2base=None, scale=1.0, extrinsic_convention=None
+        self,
+        pcd,
+        mesh=True,
+        T_cam2base=None,
+        scale=1.0,
+        extrinsic_convention=None,
+        z_deskew=False,
     ):
         """
         Computes sequential data for the entire trajectory, including sparse OCC indices
@@ -997,6 +1134,32 @@ class DataGenerator:
         camera_poses = torch.from_numpy(self.camera_pose).to(device).float()
         self.occ_frame_pointcloud = None
         self.occ_frame_camera_trajectory = None
+        self.occ_per_frame_T_cam2base = None
+        per_frame_T_list = []
+
+        # Method A: per-frame ego ground leveling (Lerobot/opencv, only when z_deskew is on),
+        # on top of the frame-0 fold in T_cam2base. None -> no per-frame leveling.
+        per_frame_R_level = None
+        if z_deskew and extrinsic_convention == "opencv" and T_cam2base is not None:
+            _level_t0 = time.time()
+            per_frame_R_level = self._compute_perframe_leveling(
+                pcd_points_world_np, self.camera_pose, T_cam2base
+            )
+            print(
+                f"[level] z-axis per-frame deskew over {total_frames} frames: "
+                f"{time.time() - _level_t0:.3f}s"
+            )
+
+        # Per-frame ground-tilt diagnostic on the leveled pcd_points_base (read-only): with
+        # leveling on every sampled frame should read ~0. Sample evenly-spaced frames (incl.
+        # 0 and last).
+        diag_frames = (
+            set(np.linspace(0, total_frames - 1, min(total_frames, 25)).astype(int).tolist())
+            if total_frames > 0
+            else set()
+        )
+        diag_tilts = {}
+
         for i in range(total_frames):
             current_pose = camera_poses[i]
 
@@ -1007,12 +1170,32 @@ class DataGenerator:
 
             pcd_points_cam *= scale
 
-            if T_cam2base is not None:
+            # Per-frame leveling (Method A): rotate this frame's base by R_level[i] on top of
+            # the shared T_cam2base. T_cam2base_i drives every R_c2b path for this frame (point
+            # cloud, last-frame trajectory, check_visual_occ rays) so they stay consistent.
+            if per_frame_R_level is not None:
+                T_cam2base_i = np.array(T_cam2base, dtype=np.float32)
+                T_cam2base_i[:3, :3] = (
+                    per_frame_R_level[i].astype(np.float32) @ T_cam2base_i[:3, :3]
+                )
+            else:
+                T_cam2base_i = T_cam2base
+
+            if T_cam2base_i is not None:
+                per_frame_T_list.append(np.array(T_cam2base_i, dtype=np.float32))
                 pcd_points_base = self.convert_pointcloud_camera_to_base(
-                    pcd_points_cam, T_cam2base
+                    pcd_points_cam, T_cam2base_i
                 )  # Shape: (-1, 3) in meters
             else:
                 pcd_points_base = pcd_points_cam
+
+            if i in diag_frames:
+                pts_np = (
+                    pcd_points_base.detach().cpu().numpy()
+                    if isinstance(pcd_points_base, torch.Tensor)
+                    else np.asarray(pcd_points_base)
+                )
+                diag_tilts[i] = self._ground_tilt_deg(pts_np)
 
             if i == total_frames - 1:
                 if isinstance(pcd_points_base, torch.Tensor):
@@ -1024,9 +1207,9 @@ class DataGenerator:
                     traj_points_world, current_pose
                 )
                 traj_points_cam *= scale
-                if T_cam2base is not None:
+                if T_cam2base_i is not None:
                     traj_points_base = self.convert_pointcloud_camera_to_base(
-                        traj_points_cam, T_cam2base
+                        traj_points_cam, T_cam2base_i
                     )
                 else:
                     traj_points_base = traj_points_cam
@@ -1042,7 +1225,7 @@ class DataGenerator:
 
             # Check visibility
             valid_voxels_occ, cam_visible_mask = self.check_visual_occ(
-                self.occ_pcd, T_cam2base
+                self.occ_pcd, T_cam2base_i
             )
 
             if len(valid_voxels_occ) > 0:
@@ -1068,6 +1251,36 @@ class DataGenerator:
                 print(f"  Frame {i}/{total_frames} packed.")
         occ_end = time.time()
         print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
+
+        # Stash per-frame cam->base transforms (4x4) for run_pipeline to persist.
+        # Empty only when T_cam2base is None.
+        if per_frame_T_list:
+            self.occ_per_frame_T_cam2base = np.stack(per_frame_T_list).astype(np.float32)
+
+        # --- Per-frame ground-tilt diagnostic summary ---
+        if diag_tilts:
+            items = sorted(diag_tilts.items())
+            print(
+                "[Tilt-diag] per-frame ego ground tilt vs +Z "
+                "(gravity deskew calibrated on frame 0 only, applied uniformly):"
+            )
+            for f, t in items:
+                print(
+                    f"    frame {f:>4}: {t:.2f} deg"
+                    if np.isfinite(t)
+                    else f"    frame {f:>4}: n/a (ground RANSAC failed)"
+                )
+            valid = np.array([t for _, t in items if np.isfinite(t)])
+            if valid.size:
+                f0 = diag_tilts.get(0, float("nan"))
+                flast = diag_tilts.get(total_frames - 1, float("nan"))
+                print(
+                    f"[Tilt-diag] summary: frame0={f0:.2f} deg, last={flast:.2f} deg, "
+                    f"max={valid.max():.2f} deg, mean={valid.mean():.2f} deg "
+                    f"over {valid.size} sampled frames. Large frame0 ⇒ deskew under-corrected; "
+                    f"large last/max with small frame0 ⇒ orientation drift along trajectory "
+                    f"(candidate for per-frame leveling)."
+                )
 
         final_occ = (
             torch.concat(all_sparse_indices_occ, dim=0).cpu().numpy()

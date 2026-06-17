@@ -905,6 +905,46 @@ class InternNavDataGenerator(DataGenerator):
         else:
             print(f"JSON path does not exist: {json_path}")
 
+    def save_transforms_parquet(self, paths, per_frame_T_cam2base):
+        """Lerobot z-deskew only: write per-frame cam->base transforms to a fresh
+        ``data/chunk-000/episode_000000.parquet`` (N1-consistent name).
+
+        Each row is one 4x4 ``T_cam2base_i`` (float32, with the frame-0 fold + per-frame
+        leveling in its rotation), stored as list-of-rows (like the N1 ``action`` column) so
+        ``np.asarray(cell)`` -> (4, 4). Lets downstream select the corrected data state.
+
+        Args:
+            paths (dict): Output paths from ``get_io_paths`` (uses ``paths['parquet']``).
+            per_frame_T_cam2base (np.ndarray or None): (N, 4, 4) transforms, or None to skip.
+        """
+        parquet_path = paths.get("parquet")
+        if parquet_path is None:
+            print("[parquet] no parquet path resolved; skipping transform save.")
+            return
+        if per_frame_T_cam2base is None or len(per_frame_T_cam2base) == 0:
+            print(
+                "[parquet] no per-frame cam->base transforms available "
+                "(T_cam2base missing?); skipping transform save."
+            )
+            return
+
+        mats = np.asarray(per_frame_T_cam2base, dtype=np.float32)
+        n = mats.shape[0]
+        data = {
+            "index": np.arange(n, dtype=np.int64),
+            "frame_index": np.arange(n, dtype=np.int64),
+            "T_cam2base": [[row for row in m] for m in mats],
+        }
+        try:
+            pd.DataFrame(data).to_parquet(parquet_path, engine="pyarrow")
+            print(
+                f"[parquet] saved per-frame cam->base transforms: {parquet_path} "
+                f"({n} frames)"
+            )
+        except Exception as e:
+            print(f"[parquet] failed to save cam->base transforms: {e}")
+            raise e
+
     def update_meta_episodes_jsonl(self, scale):
         """
         Updates `meta/episodes.jsonl` with the calculated scale value.
@@ -1017,6 +1057,7 @@ class InternNavDataGenerator(DataGenerator):
         mesh=False,
         T_cam2base=None,
         extrinsic_convention=None,
+        z_deskew=False,
     ):
         """
         Executes the full data generation pipeline:
@@ -1038,6 +1079,10 @@ class InternNavDataGenerator(DataGenerator):
                 OpenCV(Pi3X)->extrinsic basis change: ``"opengl"`` (N1 rendered extrinsics) applies
                 C=diag(1,-1,-1); ``"opencv"`` (Lerobot hand-eye) / None applies no flip. Produced and
                 passed through by ``InternNavSequenceLoader.get_trajectory_info``. Defaults to None.
+            z_deskew (bool, optional): Lerobot (opencv) only — enable the z-axis tilt deskew
+                (frame-0 gravity fold + per-frame leveling) and write the per-frame cam->base
+                transforms to ``data/chunk-000/episode_000000.parquet``. Default False. N1
+                (opengl) is unaffected.
 
         Returns:
             None
@@ -1061,9 +1106,9 @@ class InternNavDataGenerator(DataGenerator):
         self.camera_pose[:, :3, 3] *= s
         print(f"[Scale Info] no align_to_world; scale={s:.4f} (metric_scale_correction)")
 
-        # Lerobot (OpenCV extrinsics): fold the ground-normal->+Z deskew into T_cam2base (base
-        # frame) to fix the slight Z down-tilt consistently across frames. N1 (OpenGL) is skipped.
-        if extrinsic_convention == "opencv" and T_cam2base is not None:
+        # Lerobot (OpenCV) z-deskew, only when enabled: fold ground-normal->+Z into T_cam2base
+        # to fix the slight Z down-tilt. Off -> raw hand-eye. N1 (OpenGL) skipped.
+        if z_deskew and extrinsic_convention == "opencv" and T_cam2base is not None:
             T_cam2base = self._fold_gravity_into_tcam2base(pcd, T_cam2base)
 
         self.update_meta_episodes_jsonl(s)
@@ -1080,6 +1125,7 @@ class InternNavDataGenerator(DataGenerator):
                 T_cam2base=T_cam2base,
                 scale=1.0,
                 extrinsic_convention=extrinsic_convention,
+                z_deskew=z_deskew,
             )
         )
 
@@ -1089,6 +1135,11 @@ class InternNavDataGenerator(DataGenerator):
 
         # Update metadata
         self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
+
+        # Lerobot z-deskew: persist per-frame cam->base transforms to episode_000000.parquet.
+        # After update_metadata so its "Parquet not found" path stays harmless.
+        if z_deskew and extrinsic_convention == "opencv":
+            self.save_transforms_parquet(paths, self.occ_per_frame_T_cam2base)
 
         if pcd_save:
             # Save global data

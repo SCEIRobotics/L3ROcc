@@ -59,6 +59,7 @@ def run_dataset_pipeline(args):
 
     use_depth = args.use_depth
     use_intrinsic = args.use_intrinsic
+    z_deskew = args.use_z_deskew
     is_pi3 = args.model_type == "pi3"
 
     model_dir = os.path.join(project_root, "ckpt")
@@ -193,6 +194,7 @@ def run_dataset_pipeline(args):
                 mesh=mesh,
                 T_cam2base=cam_extrinsics,
                 extrinsic_convention=cam_convention,
+                z_deskew=z_deskew,
             )
 
             print("Processing successful!")
@@ -257,6 +259,15 @@ if __name__ == "__main__":
         default="",
         help="Optional info.json path with 'head_camera_intrinsic'. When set, overrides "
         "the per-trajectory loaded intrinsic (parquet or meta/info.json) for ALL trajectories.",
+    )
+    parser.add_argument(
+        "--use_z_deskew",
+        type=_parse_bool,
+        default=False,
+        metavar="true|false",
+        help="Lerobot (opencv) only: enable z-axis tilt deskew (frame-0 fold + per-frame "
+        "leveling) and write per-frame cam->base transforms to "
+        "data/chunk-000/episode_000000.parquet. Default false. No effect on N1 (opengl).",
     )
 
     # ---------- Output options ----------
