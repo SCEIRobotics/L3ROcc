@@ -200,12 +200,13 @@ class InternNavSequenceLoader:
                 - depth_path (str or None): Absolute path to the depth video file if available.
                 - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix.
                 - camera_extrinsic (np.ndarray or None): 4x4 camera to base extrinsic matrix.
-                - extrinsic_convention (str or None): 相机约定，决定 OpenCV(Pi3X)->外参约定 的换基:
-                    * "opengl" -- 外参来自 InternData-N1 parquet observation.camera_extrinsic
-                      (3D-Front 渲染相机, OpenGL Y-up/Z-back)。下游需对 Pi3X 施加 C=diag(1,-1,-1)。
-                    * "opencv" -- 外参来自 lerobot meta/info.json的手眼标定 R_cam2gripper
-                      (实采相机, OpenCV Y-down, 与 Pi3X 一致)。下游不翻转 (C=identity)。
-                    * None -- 无外参。
+                - extrinsic_convention (str or None): camera convention selecting the
+                  OpenCV(Pi3X)->extrinsic basis change:
+                    * "opengl" -- extrinsic from InternData-N1 parquet observation.camera_extrinsic
+                      (3D-Front render camera, OpenGL Y-up/Z-back); downstream applies C=diag(1,-1,-1).
+                    * "opencv" -- extrinsic from Lerobot meta/info.json hand-eye R_cam2gripper
+                      (real camera, OpenCV Y-down, same as Pi3X); downstream applies no flip.
+                    * None -- no extrinsic.
         """
 
         def _reshape_matrix(value, shape):
@@ -227,7 +228,7 @@ class InternNavSequenceLoader:
         # 2. Parse Parquet data to extract camera intrinsics / extrinsics
         camera_intrinsic = None
         camera_extrinsic = None
-        # 外参约定: 由产出 camera_extrinsic 的分支决定 (见 Returns 文档)。
+        # Set by whichever branch produces camera_extrinsic (see Returns).
         extrinsic_convention = None
 
         df = pd.read_parquet(data_path)
@@ -242,7 +243,7 @@ class InternNavSequenceLoader:
                 df["observation.camera_extrinsic"].tolist()[0], (4, 4)
             )
             if camera_extrinsic is not None:
-                # InternData-N1 渲染相机外参 = OpenGL 约定。
+                # InternData-N1 render-camera extrinsics use the OpenGL convention.
                 extrinsic_convention = "opengl"
 
         if camera_intrinsic is not None:
@@ -251,8 +252,9 @@ class InternNavSequenceLoader:
             )
 
         # 3. Fallback: try meta/info.json for intrinsics and/or hand-eye extrinsic.
-        #    lerobot parquet 既无 observation.camera_intrinsic 也无 observation.camera_extrinsic,
-        #    内参/外参都需从 meta/info.json 取（外参=手眼标定 R_cam2gripper，cam->base 旋转）。
+        # lerobot parquet has neither observation.camera_intrinsic nor observation.camera_extrinsic,
+        # Both intrinsic and extrinsic parameters need to be retrieved from meta/info.json 
+        # (extrinsic = hand-eye calibration R_cam2gripper, cam->base rotation).
         if camera_intrinsic is None or camera_extrinsic is None:
             info_json_path = os.path.join(traj_root, "meta", "info.json")
             if os.path.exists(info_json_path):
@@ -280,7 +282,7 @@ class InternNavSequenceLoader:
                     if t_raw is not None:
                         T[:3, 3] = np.array(t_raw, dtype=float).reshape(3)
                     camera_extrinsic = T
-                    # 实采手眼标定相机 = OpenCV 约定 (与 Pi3X 一致, 下游不翻转)。
+                    # Real hand-eye-calibrated camera uses OpenCV (same as Pi3X, no flip).
                     extrinsic_convention = "opencv"
                     print(
                         f"Loaded head_camera_extrinsic.R_cam2gripper from info.json "

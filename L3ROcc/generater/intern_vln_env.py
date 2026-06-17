@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from L3ROcc.base import DataGenerator
-from L3ROcc.utils import compute_similarity_transform
 
 
 def _quat_wxyz_to_R(q):
@@ -91,13 +90,13 @@ class InternNavDataGenerator(DataGenerator):
                 or "observation.camera_intrinsic_occ" not in df.columns
             ):
                 print(
-                    f"[Status] Missing OCC camera columns in parquet. Needs generation."
+                    "[Status] Missing OCC camera columns in parquet. Needs generation."
                 )
                 return True
 
             if "observation.camera_extrinsic" not in df.columns:
                 print(
-                    f"[Status] Base camera_extrinsic missing in parquet. Needs generation."
+                    "[Status] Base camera_extrinsic missing in parquet. Needs generation."
                 )
                 return True
 
@@ -109,7 +108,7 @@ class InternNavDataGenerator(DataGenerator):
                 valid_base_ext
             ):
                 print(
-                    f"[Status] Valid length mismatch between base extrinsic and OCC camera data. Needs generation."
+                    "[Status] Valid length mismatch between base extrinsic and OCC camera data. Needs generation."
                 )
                 return True
 
@@ -132,7 +131,7 @@ class InternNavDataGenerator(DataGenerator):
 
                 if not entries or any("scale" not in entry for entry in entries):
                     print(
-                        f"[Status] Missing 'scale' key in episodes.jsonl. Needs generation."
+                        "[Status] Missing 'scale' key in episodes.jsonl. Needs generation."
                     )
                     return True
         except Exception as e:
@@ -168,9 +167,8 @@ class InternNavDataGenerator(DataGenerator):
         occ_view_dir = os.path.join(video_chunk_dir, "observation.occ.view")
         occ_mask_dir = os.path.join(video_chunk_dir, "observation.occ.mask")
 
-        for d in [data_chunk_dir, video_chunk_dir, occ_view_dir, occ_mask_dir]:
-            if not os.path.exists(d):
-                os.makedirs(d)
+        for d in (data_chunk_dir, video_chunk_dir, occ_view_dir, occ_mask_dir):
+            os.makedirs(d, exist_ok=True)
 
         # 2. Define file paths
         paths = {
@@ -239,18 +237,14 @@ class InternNavDataGenerator(DataGenerator):
 
             # --- Schema A: InternData-N1 action column = (4, 4) SE(3) ---
             if "action" in df.columns:
-                gt_raw = df["action"].tolist()
                 gt_poses_np = []
-                for p in gt_raw:
+                for p in df["action"]:
                     if p is None:
                         continue
-                    try:
-                        mat = np.stack(p)
-                    except Exception:
-                        mat = np.asarray(p)
+                    mat = np.asarray(p, dtype=np.float64)
                     if mat.shape == (4, 4):
-                        gt_poses_np.append(mat.astype(np.float64))
-                if len(gt_poses_np) >= 1:
+                        gt_poses_np.append(mat)
+                if gt_poses_np:
                     return np.array(gt_poses_np)
 
             # --- Schema B: lerobot rosbag observation.state (14-dim) + hand-eye ---
@@ -282,9 +276,7 @@ class InternNavDataGenerator(DataGenerator):
                     R_raw = ext.get("R_cam2gripper", ext.get("R_cam2robot", None))
                     if R_raw is not None:
                         R_arr = np.asarray(R_raw, dtype=np.float64)
-                        if R_arr.shape == (3, 3):
-                            R_cam2body = R_arr
-                        elif R_arr.size == 9:
+                        if R_arr.size == 9:
                             R_cam2body = R_arr.reshape(3, 3)
                         else:
                             print(
@@ -345,6 +337,8 @@ class InternNavDataGenerator(DataGenerator):
         Computes the scale ratio (GT / Pred) between predicted and ground truth trajectories.
         Uses the ratio of standard deviations (Sim3 scale estimation).
 
+        NOTE: not used by the data-processing pipeline; kept for verification only.
+
         Args:
             poses_gt : Ground truth poses (N, 4, 4).
             poses_pred : Predicted poses (N, 4, 4).
@@ -353,22 +347,10 @@ class InternNavDataGenerator(DataGenerator):
             scale: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
         """
 
-        # def to_mat4x4(p):
-        #     p = np.array(p)
-        #     if p.ndim == 1:
-        #         if p.size == 16:
-        #             return p.reshape(4, 4)
-        #         if p.size == 12:
-        #             return np.vstack([p.reshape(3, 4), [0, 0, 0, 1]])
-        #     return p
-
-        traj_gt = np.array([p[:3, 3] for p in poses_gt])
-        traj_pred = np.array([p[:3, 3] for p in poses_pred])
-
-        # Ensure frame counts match
-        n_frames = min(len(traj_gt), len(traj_pred))
-        traj_gt = traj_gt[:n_frames]
-        traj_pred = traj_pred[:n_frames]
+        # Ensure frame counts match, then extract translation columns.
+        n_frames = min(len(poses_gt), len(poses_pred))
+        traj_gt = np.asarray(poses_gt)[:n_frames, :3, 3]
+        traj_pred = np.asarray(poses_pred)[:n_frames, :3, 3]
 
         if n_frames < 5:
             print("Warning: Trajectory too short for scale estimation. Using scale=1.0")
@@ -391,7 +373,7 @@ class InternNavDataGenerator(DataGenerator):
         scale = std_gt / std_pred
 
         if np.isnan(scale) or np.isinf(scale):
-            print(f"[Scale Warning] Calculated scale is NaN/Inf. Using 1.0")
+            print("[Scale Warning] Calculated scale is NaN/Inf. Using 1.0")
             return 1.0
 
         print(
@@ -401,7 +383,9 @@ class InternNavDataGenerator(DataGenerator):
 
     def align_with_gt_scale(self, input_path, pcd):
         """
-        Aligns the Pi3X reconstruction to the GT world frame via a two-stage Sim3 transform:
+        Aligns the Pi3X reconstruction to the GT world frame via a two-stage Sim3 transform.
+
+        NOTE: not used by the data-processing pipeline; kept for verification only.
 
         1. **Rotation** (orthogonal Procrustes on the per-frame camera rotation columns):
            solve ``R = argmin Σ ||R · R_pred[t] - R_gt[t]||`` via SVD of
@@ -626,37 +610,35 @@ class InternNavDataGenerator(DataGenerator):
             return pcd, 1.0
 
     def _gravity_R_to_z(self, pcd, cam_centers):
-        """地面 RANSAC 估法向，用"相机在地面之上"消歧符号，返回把地面法向转到 +Z 的 Rodrigues
-        旋转 R_grav 与纠前 tilt（度）。被 ``_gravity_align_to_z``（world 系）与
-        ``_fold_gravity_into_tcam2base``（base 系）复用。
+        """Estimate the ground plane by RANSAC and return the Rodrigues rotation mapping its
+        normal to +Z, plus the pre-correction tilt (deg). The normal sign is disambiguated by
+        "camera above ground". Shared by ``_gravity_align_to_z`` (world frame) and
+        ``_fold_gravity_into_tcam2base`` (base frame).
 
         Args:
-            pcd : (N, 3) 点云
-            cam_centers : (T, 3) 相机中心（用于法向符号消歧）
+            pcd : (N, 3) point cloud.
+            cam_centers : (T, 3) camera centers, used to disambiguate the normal sign.
 
         Returns:
-            (R_grav (3,3) f64, tilt_before_deg)
+            (R_grav (3, 3) f64, tilt_before_deg)
         """
         import open3d as o3d
 
         pcd64 = np.asarray(pcd, dtype=np.float64)
         if pcd64.shape[0] < 100:
-            raise ValueError(
-                f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}"
-            )
+            raise ValueError(f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}")
 
         o3d_pcd = o3d.geometry.PointCloud()
         o3d_pcd.points = o3d.utility.Vector3dVector(pcd64)
         plane, inliers = o3d_pcd.segment_plane(
             distance_threshold=0.05, ransac_n=3, num_iterations=300
         )
-        # 法向符号用"相机在地面之上"消歧（物理上相机挂在机器人本体、在地面之上）。
-        # 不能用 n[2]>0：Pi3X/OpenCV 帧0 系里 +Z 是相机前向(近水平)，该方向符号任意/含噪，
-        # 会把整个场景旋成上下颠倒。改为：法向应指向相机一侧。
-        a, b, c, d = float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])
-        n_ground = np.array([a, b, c], dtype=np.float64)
+        # Disambiguate the normal sign by "camera above ground": n[2]>0 is unreliable because
+        # +Z is the (near-horizontal) camera forward in the Pi3X/OpenCV frame-0 system.
+        a, b, c, d = plane
+        n_ground = np.array([a, b, c])
         cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
-        mean_signed = float(np.mean(cc @ n_ground + d))  # 相机相对平面平均有符号距离
+        mean_signed = np.mean(cc @ n_ground + d)  # mean signed camera-to-plane distance
         if mean_signed < 0:
             n_ground = -n_ground
         n_ground /= max(np.linalg.norm(n_ground), 1e-12)
@@ -672,31 +654,28 @@ class InternNavDataGenerator(DataGenerator):
                 f"cannot estimate gravity reliably"
             )
 
-        target = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        target = np.array([0.0, 0.0, 1.0])
         axis = np.cross(n_ground, target)
         s_axis = float(np.linalg.norm(axis))
         c_axis = float(np.dot(n_ground, target))
         if s_axis <= 1e-6:
-            # 已与 +Z 对齐（反向情形上面已翻正）；无需旋转
-            R_grav = np.eye(3, dtype=np.float64)
-        else:
-            k_unit = axis / s_axis
-            K_skew = np.array(
-                [[0.0, -k_unit[2], k_unit[1]],
-                 [k_unit[2], 0.0, -k_unit[0]],
-                 [-k_unit[1], k_unit[0], 0.0]],
-                dtype=np.float64,
-            )
-            R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+            return np.eye(3), tilt_before  # already aligned with +Z
+        k_unit = axis / s_axis
+        K_skew = np.array(
+            [[0.0, -k_unit[2], k_unit[1]],
+             [k_unit[2], 0.0, -k_unit[0]],
+             [-k_unit[1], k_unit[0], 0.0]],
+        )
+        R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
         return R_grav, tilt_before
 
     def _fold_gravity_into_tcam2base(self, pcd, T_cam2base):
-        """Lerobot(实采, OpenCV 外参) 专用：复现实验的 base 系 Z 倾斜重力纠偏并**折进外参旋转**。
+        """Lerobot-only: fold the base-frame Z-tilt gravity deskew into the extrinsic rotation.
 
-        在帧0 base 系（world->cam0->base，Lerobot 约定 C=identity）估计把地面法向转到 +Z 的 R_deskew，
-        折进 ``T_cam2base`` 旋转（R_eff = R_deskew @ R_c2b），从而对**所有帧**一致地纠正 OCC/base 的轻微下倾，
-        与 exp_coord_align 帧0 结果逐点一致。绕 base 原点（=帧0相机）旋转，保持轨迹起点不动。
-        失败（点太少 / RANSAC 不可靠）则告警并原样返回，跳过纠偏。
+        Estimate R_deskew (ground normal -> +Z) in the frame-0 base frame (Lerobot convention
+        C=identity) and fold it as R_eff = R_deskew @ R_c2b, so every frame's OCC/base output is
+        deskewed consistently (matching exp_coord_align's frame-0 result). On RANSAC failure,
+        warn and return T_cam2base unchanged.
         """
         try:
             cam0 = self.camera_pose[0]
@@ -704,35 +683,34 @@ class InternNavDataGenerator(DataGenerator):
                 self.convert_pointcloud_world_to_camera(pcd, cam0), T_cam2base
             )
             cc_base0 = self.convert_pointcloud_camera_to_base(
-                self.convert_pointcloud_world_to_camera(
-                    np.asarray(self.camera_pose)[:, :3, 3], cam0
-                ),
+                self.convert_pointcloud_world_to_camera(self.camera_pose[:, :3, 3], cam0),
                 T_cam2base,
             )
             R_deskew, tilt_before = self._gravity_R_to_z(p_base0, cc_base0)
         except Exception as e:
             print(f"[gravity-base] lerobot Z-tilt deskew skipped: {e}")
             return T_cam2base
-        T_eff = np.asarray(T_cam2base, dtype=np.float32).copy()
-        T_eff[:3, :3] = (R_deskew @ T_eff[:3, :3].astype(np.float64)).astype(np.float32)
-        print(
-            f"[gravity-base] lerobot Z-tilt deskew folded into T_cam2base: "
-            f"tilt {tilt_before:.2f} deg -> ~0"
-        )
+        T_eff = np.array(T_cam2base, dtype=np.float32)
+        T_eff[:3, :3] = R_deskew @ T_eff[:3, :3]
+        print(f"[gravity-base] lerobot Z-tilt deskew folded into T_cam2base: tilt {tilt_before:.2f} deg -> ~0")
         return T_eff
 
     def _gravity_align_to_z(self, pcd, camera_pose, pivot):
-        """用地面 RANSAC 估重力方向，构造把地面法向转到 +Z 的 Rodrigues 旋转，绕 pivot
-        同步旋转点云与相机位姿。
+        """Estimate gravity via ground RANSAC and rotate the point cloud and camera poses
+        about ``pivot`` so the ground normal maps to +Z.
+
+        NOTE: not used by the data-processing pipeline; kept for verification only
+        (called by ``align_to_world``).
 
         Args:
-            pcd : (N, 3) 点云（将被旋转）
-            camera_pose : (T, 4, 4) 相机位姿（将被旋转）
-            pivot : (3,) 旋转中心（通常帧 0 相机位置）
+            pcd : (N, 3) point cloud (rotated).
+            camera_pose : (T, 4, 4) camera poses (rotated).
+            pivot : (3,) rotation center (usually the frame-0 camera position).
 
         Returns:
-            (pcd_rot (N,3) f32, camera_pose_rot (T,4,4) f32, tilt_before_deg,
-             tilt_after_deg, ground_z)  —— ground_z 为旋转后地面在世界系的 z 电平
+            (pcd_rot (N, 3) f32, camera_pose_rot (T, 4, 4) f32, tilt_before_deg,
+             tilt_after_deg, ground_z) — ground_z is the world-frame z level of the
+             ground after rotation.
         """
         import open3d as o3d
 
@@ -746,7 +724,8 @@ class InternNavDataGenerator(DataGenerator):
         cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
         cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
 
-        # 旋转后复测地面：验证 tilt，并取地面 z 电平 ground_z（地面水平后处处同 z）。
+        # Re-fit the ground after rotation to verify tilt and read the ground z level
+        # (constant across the now-horizontal plane).
         o3d_pcd2 = o3d.geometry.PointCloud()
         o3d_pcd2.points = o3d.utility.Vector3dVector(pcd_rot)
         plane2, _ = o3d_pcd2.segment_plane(
@@ -758,7 +737,7 @@ class InternNavDataGenerator(DataGenerator):
                 f"[gravity] post-correction ground plane not horizontal (c2={c2:.3e}); "
                 f"gravity alignment failed"
             )
-        ground_z = float(-float(plane2[3]) / c2)  # 平面 a x+b y+c z+d=0 在水平时的 z 电平
+        ground_z = float(-float(plane2[3]) / c2)  # z level of plane ax+by+cz+d=0 when horizontal
         n2 = np.asarray(plane2[:3], dtype=np.float64)
         n2 /= max(np.linalg.norm(n2), 1e-12)
         if n2[2] < 0:
@@ -777,20 +756,25 @@ class InternNavDataGenerator(DataGenerator):
         )
 
     def align_to_world(self, pcd):
-        """GT-free 把 Pi3X 重建对齐到真实世界系（z 朝上、帧 0 规范原点/朝向）。
+        """GT-free alignment of the Pi3X reconstruction to the real-world frame (z up,
+        frame-0 canonical origin/orientation).
 
-        与 ``align_with_gt_scale`` 不同：不读任何 GT odom。依据：
-          - 尺度：直接信任 Pi3X metric_head（已实验验证），外加 config 可选修正系数
-            ``self.metric_scale_correction``（默认 1.0）。
-          - 重力(roll/pitch)：地面 RANSAC 估法向 -> +Z（_gravity_align_to_z）。
-            注意 Pi3X 世界系锚定帧 0 相机(OpenCV)，相机已在该坐标系，故地面法向
-            即可恢复全局重力，无需GT。
-          - 原点/朝向(yaw)：帧 0 规范——原点取**帧 0 相机正下方的地面**（x,y=帧0相机、z=地面电平），
-            使地面 z=0、相机在 +高度(~0.6)、重建点云多为正值（符合"本体在地面上"）；
-            绕 +Z 旋转使帧 0 前向投影到 +X。OCC 为 ego 系、对全局 yaw/平移不变，此步仅为
-            全局可视化与落盘位姿的确定性。
+        NOTE: not used by the data-processing pipeline; kept for verification only.
 
-        就地更新 self.pcd / self.camera_pose；返回 (pcd_aligned, scale)。
+        Unlike ``align_with_gt_scale``, this reads no GT odom:
+          - Scale: trust the Pi3X metric_head (experimentally validated), with the optional
+            config correction factor ``self.metric_scale_correction`` (default 1.0).
+          - Gravity (roll/pitch): ground RANSAC normal -> +Z (``_gravity_align_to_z``). The
+            Pi3X world frame is anchored at the frame-0 camera (OpenCV), so the ground normal
+            alone recovers global gravity without GT.
+          - Origin/yaw: frame-0 canonical — origin is the ground point under the frame-0
+            camera (x,y = frame-0 camera, z = ground level), giving ground z=0, the camera at
+            positive height (~0.6), and a mostly-positive point cloud ("body on the ground");
+            a +Z rotation maps the frame-0 forward to +X. OCC is ego-frame and invariant to
+            global yaw/translation, so this step only fixes global visualization and the
+            saved poses.
+
+        Updates self.pcd / self.camera_pose in place; returns (pcd_aligned, scale).
         """
         if self.camera_pose is None or len(self.camera_pose) == 0:
             raise ValueError("[align_to_world] camera_pose is empty")
@@ -798,14 +782,14 @@ class InternNavDataGenerator(DataGenerator):
         pcd_np = np.asarray(pcd, dtype=np.float64)
         cp = np.asarray(self.camera_pose, dtype=np.float64).copy()
 
-        # 1) 尺度（config 可选修正系数；默认 1.0 = 直接信任 metric_head）
+        # 1) Scale (optional config correction factor; default 1.0 = trust metric_head)
         s = float(self.metric_scale_correction)
         if not np.isfinite(s) or s <= 0:
             raise ValueError(f"[align_to_world] invalid metric_scale_correction: {s}")
         pcd_np = pcd_np * s
         cp[:, :3, 3] = cp[:, :3, 3] * s
 
-        # 2) 重力对齐（绕帧 0）
+        # 2) Gravity alignment (about frame 0)
         pivot = cp[0, :3, 3].copy()
         pcd_g, cp_g, tilt_b, tilt_a, ground_z = self._gravity_align_to_z(
             pcd_np, cp, pivot
@@ -813,7 +797,7 @@ class InternNavDataGenerator(DataGenerator):
         pcd_np = np.asarray(pcd_g, dtype=np.float64)
         cp = np.asarray(cp_g, dtype=np.float64)
 
-        # 3) yaw 规范：帧 0 前向(OpenCV z 轴在世界系)投影到 XY，旋到 +X
+        # 3) Yaw canonicalization: project frame-0 forward (OpenCV z axis in world) onto XY, rotate to +X
         pivot = cp[0, :3, 3].copy()
         fwd = cp[0, :3, 2].copy()
         fwd[2] = 0.0
@@ -829,7 +813,7 @@ class InternNavDataGenerator(DataGenerator):
             cp[:, :3, 3] = (Rz @ (cp[:, :3, 3] - pivot).T).T + pivot
             cp[:, :3, :3] = np.einsum("ij,tjk->tik", Rz, cp[:, :3, :3])
 
-        # 4) 原点：x,y 取帧 0 相机、z 取地面电平 -> 地面 z=0、相机在 +高度、点云多为正
+        # 4) Origin: x,y from frame-0 camera, z from ground level -> ground z=0, camera at +height, mostly-positive pcd
         origin = np.array(
             [cp[0, 0, 3], cp[0, 1, 3], ground_z], dtype=np.float64
         )
@@ -932,8 +916,6 @@ class InternNavDataGenerator(DataGenerator):
         Returns:
             None: Modifies the jsonl file on disk.
         """
-        import json
-
         meta_dir = os.path.join(self.save_path, "meta")
         jsonl_path = os.path.join(meta_dir, "episodes.jsonl")
 
@@ -1052,9 +1034,10 @@ class InternNavDataGenerator(DataGenerator):
             overwrite (bool, optional): Whether to overwrite existing files. Defaults to False.
             mesh (bool, optional): Whether to use mesh instead of origin point cloud. Defaults to False.
             T_cam2base (np.ndarray, optional): 4x4 transformation matrix from camera to base coordinate system. Defaults to None.
-            extrinsic_convention (str, optional): ``T_cam2base`` 的相机约定，决定 OpenCV(Pi3X)->外参约定
-                的换基：``"opengl"``(N1 渲染外参) 施加 C=diag(1,-1,-1)；``"opencv"``(lerobot 实采手眼) / None
-                不翻转。由 ``InternNavSequenceLoader.get_trajectory_info`` 产出并透传。Defaults to None.
+            extrinsic_convention (str, optional): Camera convention of ``T_cam2base``, selecting the
+                OpenCV(Pi3X)->extrinsic basis change: ``"opengl"`` (N1 rendered extrinsics) applies
+                C=diag(1,-1,-1); ``"opencv"`` (Lerobot hand-eye) / None applies no flip. Produced and
+                passed through by ``InternNavSequenceLoader.get_trajectory_info``. Defaults to None.
 
         Returns:
             None
@@ -1068,18 +1051,18 @@ class InternNavDataGenerator(DataGenerator):
             input_path, condit_depth_path, intrinsics_np
         )
 
-        # 不再用 align_to_world 做坐标对齐（与 exp_coord_align 一致）：坐标对齐由 compute_sequence_data
-        # 的相机约定换基 C（按 extrinsic_convention：N1=OpenGL 折 diag(1,-1,-1)、lerobot=OpenCV 不翻转）完成。
-        # 尺度：信任 metric_head + config 修正系数（沿用 align_to_world 的尺度处理，就地缩放 pcd 与相机平移）。
-        # 旧 align_to_world / align_with_gt_scale / get_gt_poses 保留供离线 GT 诊断，pipeline 不再调用。
+        # No align_to_world (matches exp_coord_align): coordinate alignment is done by the
+        # camera-convention basis change C in compute_sequence_data (per extrinsic_convention).
+        # Scale trusts metric_head plus the config correction factor; apply it in place to pcd and
+        # camera translations. align_to_world / align_with_gt_scale / get_gt_poses are kept for
+        # offline GT diagnosis only.
         s = float(self.metric_scale_correction)
-        pcd = pcd * s
-        self.pcd = pcd
-        self.camera_pose[:, :3, 3] = self.camera_pose[:, :3, 3] * s
+        pcd = self.pcd = pcd * s
+        self.camera_pose[:, :3, 3] *= s
         print(f"[Scale Info] no align_to_world; scale={s:.4f} (metric_scale_correction)")
 
-        # Lerobot(实采, OpenCV 外参)：仅对 Z 轴轻微下倾做重力纠偏，把地面法向->+Z 的 R_deskew
-        # 折进 T_cam2base(base 系)，对所有帧一致纠偏。N1(OpenGL) 不纠偏。
+        # Lerobot (OpenCV extrinsics): fold the ground-normal->+Z deskew into T_cam2base (base
+        # frame) to fix the slight Z down-tilt consistently across frames. N1 (OpenGL) is skipped.
         if extrinsic_convention == "opencv" and T_cam2base is not None:
             T_cam2base = self._fold_gravity_into_tcam2base(pcd, T_cam2base)
 
@@ -1089,7 +1072,7 @@ class InternNavDataGenerator(DataGenerator):
 
         paths = self.get_io_paths(input_path)
 
-        # Execute core computation. 尺度已就地施加到 pcd / camera_pose，故 OCC/voxel 阶段不再缩放(scale=1.0)。
+        # Scale already applied in place to pcd / camera_pose, so the OCC/voxel stage uses scale=1.0.
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
             self.compute_sequence_data(
                 pcd,

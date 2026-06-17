@@ -39,7 +39,7 @@ from third_party.pi3.pi3.utils.basic import (  # Assuming you have a helper func
 # from pi3.utils.geometry import homogenize_points
 from third_party.pi3.pi3.utils.geometry import depth_edge
 
-# 该常量用于把 OpenCV 相机系换基到 OpenGL 渲染相机系: p_render = C @ p_opencv。
+# Basis change from OpenCV camera frame to OpenGL render frame: p_render = C @ p_opencv.
 R_OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
 
 
@@ -960,15 +960,13 @@ class DataGenerator:
         grid_dims = self.config["occ_size"]  # (H, W, D)
         device = self.device
 
-        # 相机约定换基 (按数据集区分, extrinsic_convention 由 loader 透传):
-        #   - "opengl" (InternData-N1 渲染相机外参): Pi3X 是 OpenCV、外参是 OpenGL, 需把 C=R_OPENCV_TO_OPENGL
-        #     折进 T_cam2base 的旋转 (R_eff = R_c2b @ C); 否则 base/OCC 会绕 X 轴整体翻转。
-        #   - "opencv" (lerobot 实采手眼外参) / None: 外参与 Pi3X 同为 OpenCV, 不翻转 (C=identity)。
-        # 折进 T_cam2base 后, 后续所有走 R_c2b 的 camera->base 变换 —— 点云
-        # (convert_pointcloud_camera_to_base)、末帧相机轨迹、以及 check_visual_occ 的可见性射线
-        # (norm_cam_ray @ R_c2b.T) —— 都一致换基。复制以免改动调用方数组。
+        # Camera-convention basis change (per-dataset, from the loader's extrinsic_convention):
+        # "opengl" (InternData-N1 rendered extrinsics) needs C=R_OPENCV_TO_OPENGL folded into the
+        # cam->base rotation (R_eff = R_c2b @ C), else base/OCC flips 180 deg about X. "opencv"
+        # (Lerobot hand-eye) / None is already OpenCV, no flip. Folding into T_cam2base keeps every
+        # R_c2b path consistent: point cloud, last-frame trajectory, and check_visual_occ rays.
         if T_cam2base is not None:
-            T_cam2base = np.asarray(T_cam2base, dtype=np.float32).copy()
+            T_cam2base = np.array(T_cam2base, dtype=np.float32)
             if extrinsic_convention == "opengl":
                 T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
 
