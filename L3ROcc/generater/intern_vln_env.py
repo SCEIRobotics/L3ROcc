@@ -2,6 +2,7 @@ import fcntl
 import glob
 import json
 import os
+import shutil
 import time
 
 import numpy as np
@@ -161,6 +162,9 @@ class InternNavDataGenerator(DataGenerator):
                 - 'parquet': Path to the episode metadata (.parquet).
                 - 'occ_seq': Path to the occupancy sequence (.npz).
                 - 'mask_seq': Path to the mask sequence (.npz).
+                - 'meta_dir': Path to the output meta/ directory.
+                - 'meta_info_json': Path to the output meta/info.json.
+                - 'meta_episodes_jsonl': Path to the output meta/episodes.jsonl.
         """
 
         # 1. Construct directories
@@ -168,8 +172,9 @@ class InternNavDataGenerator(DataGenerator):
         video_chunk_dir = os.path.join(self.save_path, "videos", "chunk-000")
         occ_view_dir = os.path.join(video_chunk_dir, "observation.occ.view")
         occ_mask_dir = os.path.join(video_chunk_dir, "observation.occ.mask")
+        meta_dir = os.path.join(self.save_path, "meta")
 
-        for d in (data_chunk_dir, video_chunk_dir, occ_view_dir, occ_mask_dir):
+        for d in (data_chunk_dir, video_chunk_dir, occ_view_dir, occ_mask_dir, meta_dir):
             os.makedirs(d, exist_ok=True)
 
         # 2. Define file paths
@@ -179,6 +184,9 @@ class InternNavDataGenerator(DataGenerator):
             "parquet": os.path.join(data_chunk_dir, "episode_000000.parquet"),
             "occ_seq": os.path.join(occ_view_dir, "occ_sequence.npz"),
             "mask_seq": os.path.join(occ_mask_dir, "mask_sequence.npz"),
+            "meta_dir": meta_dir,
+            "meta_info_json": os.path.join(meta_dir, "info.json"),
+            "meta_episodes_jsonl": os.path.join(meta_dir, "episodes.jsonl"),
         }
         return paths
 
@@ -210,6 +218,56 @@ class InternNavDataGenerator(DataGenerator):
             if hits:
                 return hits[0]
         return None
+
+    def _seed_source_metadata(self, input_path, paths, overwrite=False):
+        """Seed the (separate) output dir with the source dataset's records so the
+        in-place ``update_*`` steps have something to augment.
+
+        Copies the source trajectory's ``meta/`` folder and its base
+        ``episode_*.parquet`` into the output, renaming the parquet to the canonical
+        ``episode_000000.parquet``. The output keeps the lerobot/N1 originals
+        (tasks.jsonl, episodes_stats.jsonl, info.json, base camera columns), onto which
+        ``update_metadata`` / ``update_meta_episodes_jsonl`` later add OCC columns,
+        ``scale`` and OCC features. Missing sources warn but do not raise.
+
+        Args:
+            input_path (str): Input video path (same basis as ``_locate_traj_parquet``).
+            paths (dict): Output paths from ``get_io_paths`` (uses ``meta_dir`` / ``parquet``).
+            overwrite (bool): When False, an already-seeded output file/dir is left as is.
+        """
+        traj_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(input_path)))
+        )
+
+        # --- meta/ folder ---
+        src_meta = os.path.join(traj_root, "meta")
+        dst_meta = paths["meta_dir"]
+        if os.path.isdir(src_meta) and os.path.abspath(src_meta) != os.path.abspath(
+            dst_meta
+        ):
+            try:
+                shutil.copytree(src_meta, dst_meta, dirs_exist_ok=True)
+                print(f"[seed] copied source meta/ -> {dst_meta}")
+            except Exception as e:
+                print(f"[seed] failed to copy source meta/ ({e}); continuing.")
+        elif not os.path.isdir(src_meta):
+            print(f"[seed] source meta/ not found at {src_meta}; skipping meta seed.")
+
+        # --- base episode parquet ---
+        src_parquet = self._locate_traj_parquet(input_path)
+        dst_parquet = paths["parquet"]
+        if (
+            src_parquet
+            and os.path.abspath(src_parquet) != os.path.abspath(dst_parquet)
+            and (overwrite or not os.path.exists(dst_parquet))
+        ):
+            try:
+                shutil.copy2(src_parquet, dst_parquet)
+                print(f"[seed] copied source parquet -> {dst_parquet}")
+            except Exception as e:
+                print(f"[seed] failed to copy source parquet ({e}); continuing.")
+        elif not src_parquet:
+            print("[seed] source episode parquet not found; skipping parquet seed.")
 
     def get_gt_poses(self, input_path):
         """
@@ -880,10 +938,11 @@ class InternNavDataGenerator(DataGenerator):
             print(f"Parquet file not found at {parquet_path}")
 
         # --- Update JSON ---
-        traj_root = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(input_path)))
+        # Target the OUTPUT meta/info.json (seeded from source), not the input dataset,
+        # so OCC features are written to the output and the source stays untouched.
+        json_path = paths.get(
+            "meta_info_json", os.path.join(self.save_path, "meta", "info.json")
         )
-        json_path = os.path.join(traj_root, "meta", "info.json")
 
         def update_info_logic(meta):
             feat_ext = {
@@ -910,8 +969,9 @@ class InternNavDataGenerator(DataGenerator):
             print(f"JSON path does not exist: {json_path}")
 
     def save_transforms_parquet(self, paths, per_frame_T_cam2base, T_cam2base_raw):
-        """Lerobot z-deskew only: write the per-frame deskew rotation to a fresh
-        ``data/chunk-000/episode_000000.parquet`` (N1-consistent name).
+        """Lerobot z-deskew only: append the per-frame deskew rotation as an ``R_deskew``
+        column to ``data/chunk-000/episode_000000.parquet`` (already seeded with the base
+        columns and augmented with the OCC camera columns by ``update_metadata``).
 
         Each row is the 3x3 applied deskew ``D_i = R_corrected_i @ R_raw.T`` (the frame-0 fold
         composed with the per-frame leveling, a pure rotation about the base origin). It maps an
@@ -950,13 +1010,32 @@ class InternNavDataGenerator(DataGenerator):
         deskew = deskew.astype(np.float32)
 
         n = deskew.shape[0]
-        data = {
-            "index": np.arange(n, dtype=np.int64),
-            "frame_index": np.arange(n, dtype=np.int64),
-            "R_deskew": [[row for row in d] for d in deskew],
-        }
+        r_deskew = [[row for row in d] for d in deskew]
         try:
-            pd.DataFrame(data).to_parquet(parquet_path, engine="pyarrow")
+            # Augment the existing parquet (base + OCC columns) with the deskew column,
+            # keeping a single complete episode_000000.parquet. Fall back to a fresh
+            # table only if the parquet was never seeded.
+            if os.path.exists(parquet_path):
+                df = pd.read_parquet(parquet_path, engine="pyarrow")
+                if len(df) != n:
+                    raise ValueError(
+                        f"[Length Mismatch] Parquet has {len(df)} frames, "
+                        f"but deskew rotations have {n} frames."
+                    )
+                df["R_deskew"] = r_deskew
+            else:
+                print(
+                    f"[parquet] {parquet_path} not seeded; writing a fresh "
+                    f"deskew-only table."
+                )
+                df = pd.DataFrame(
+                    {
+                        "index": np.arange(n, dtype=np.int64),
+                        "frame_index": np.arange(n, dtype=np.int64),
+                        "R_deskew": r_deskew,
+                    }
+                )
+            df.to_parquet(parquet_path, engine="pyarrow")
             print(
                 f"[parquet] saved per-frame z-deskew rotation: {parquet_path} "
                 f"({n} frames)"
@@ -1136,11 +1215,15 @@ class InternNavDataGenerator(DataGenerator):
             T_cam2base_raw = np.array(T_cam2base, dtype=np.float32)
             T_cam2base = self._fold_gravity_into_tcam2base(pcd, T_cam2base)
 
+        paths = self.get_io_paths(input_path)
+
+        # Output is a separate dir: seed the source meta/ + base parquet so the in-place
+        # update_* steps below have records to augment (otherwise they silently no-op).
+        self._seed_source_metadata(input_path, paths, overwrite=overwrite)
+
         self.update_meta_episodes_jsonl(s)
 
         print("Start processing sequence frames...")
-
-        paths = self.get_io_paths(input_path)
 
         # Scale already applied in place to pcd / camera_pose, so the OCC/voxel stage uses scale=1.0.
         arr_4d_occ, arr_4d_mask, all_camera_poses, all_camera_intrinsics = (
