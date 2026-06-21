@@ -193,7 +193,7 @@ Located in `L3ROcc/generater/`, the project includes two core generators. Both s
 
 Parameters can be tuned in `L3ROcc/configs/config.yaml`:
 
-* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]` in the **robot base frame**: x = lateral (left-right), y = forward/depth, z = up (height).
+* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]` in the **canonical robot base frame** — forward = +y, lateral = ±x, up = +z, origin at the per-frame camera. A single box (forward depth 5.6 m, lateral ±2 m, height [−0.6, 1.8] m) serves all datasets because both are normalized into this one frame: N1 (OpenGL) folds `C = diag(1, -1, -1)` into `T_cam2base`, and LeRobot (OpenCV, ROS-style forward = +x) additionally folds a +90° base yaw `R_BASE_CANON_OPENCV` to map its forward +x → +y (see `compute_sequence_data`). This keeps `occ_size` identical across datasets so downstream consumers (visualization, training) need no per-dataset shape handling.
 * **`voxel_size`**: Base size for occupancy voxels (default 0.04m), directly related to the sparsity of the occupancy voxel map.
 * **`occ_size`**: Number of voxel grids in each spatial dimension, derived from `(pc_range_max - pc_range_min) / voxel_size` with no independent configuration.
 * **`metric_scale_correction`**: GT-free metric scale factor applied to the Pi3X output. Default `1.0` (trust `metric_head`); set ~`1.08` to compensate the measured ~8% under-scale on real data.
@@ -236,13 +236,13 @@ trajectory_1/
 > **LeRobot output**: outputs land under `<output_root>/<rosbag_*>/<episode_id>/` with the same `data/` + `videos/observation.occ.*` layout. When `--use_z_deskew true`, a fresh `data/chunk-000/episode_000000.parquet` is written holding the per-frame **`R_deskew`** (3×3 applied deskew rotation `D_i`); restore an un-deskewed OCC frame via `P_uncorrected = D_iᵀ · P_corrected`.
 
 ##### i. data/chunk-000/ (Core Geometric Assets)
-- **all_occ.npz**: Stores the global occupancy grid of the entire scene in world coordinates.
-- **origin_pcd.ply**: The initial global point cloud reconstructed from the video, optimized via voxel downsampling for efficient processing.
+- **all_occ.npz**: Occupancy point cloud (key `data`, shape `(M, 3)` float32) — the **occupied voxel centers in metres**, deduplicated to the `voxel_size` grid and clipped to `pc_range`. Despite the name it is **not** a world-frame global grid: it is the full reconstructed scene voxelized and expressed in the **last frame's ego base frame** (origin at the last camera; same frame as `camera_trajectory_occ_frame.ply` / `occ_frame_pointcloud.ply`), so it covers only the perception box around the last camera. The per-dataset base axes follow `pc_range` (N1: x=lateral, y=forward+, z=up).
+- **origin_pcd.ply**: The reconstructed global point cloud (voxel-downsampled) with RGB color, in the **π³ model world frame** (OpenCV, scaled by `metric_scale_correction`).
 - **episode_000000.parquet**: A structured data table containing per-frame high-level features:
   - **`observation.camera_intrinsic_occ`**: 3x3 intrinsic matrix at the **model-input resolution**. Population depends on `--use_intrinsic`:
     - **`--use_intrinsic true`** (with a valid `--condit_intr_path` or per-trajectory parquet K): the calibrated K is rescaled to model input size and written here, overriding any model-side estimate. Works for both `pi3` and `pi3x` (post-processing path is backbone-agnostic).
     - **`--use_intrinsic false`** (or no calibration available): the K is back-estimated from local geometry via Least Squares / DLT on the model's `local_points`.
-  - **`observation.camera_extrinsic_occ`**: 4x4 extrinsic matrices predicted by the π³ backbone, in world coordinates and scaled by the GT-free metric scale factor (`metric_scale_correction`; no Sim3/GT alignment).
+  - **`observation.camera_extrinsic_occ`**: 4x4 camera extrinsics (cam→world) predicted by the π³ backbone, **frame-0 anchored** into the dataset's GT world frame (InternData-N1 → `action[0]`; LeRobot → the `observation.state`-reconstructed GT[0]) so the reconstructed trajectory overlays the GT for inspection. Only the frame-0 GT pose is used as the placement anchor — the model keeps its own relative motion and GT-free metric scale (`metric_scale_correction`; no Sim3/Kabsch optimization). When no GT is available it falls back to the raw π³ model-world poses (scaled). Note: this field is therefore GT-dependent, unlike the rest of the pipeline.
 
 ##### ii. meta/ (Metadata & Statistics)
 - **info.json**: Defines the dataset schema, including the data types and shapes for observation.camera_extrinsic_occ and observation.camera_intrinsic_occ.

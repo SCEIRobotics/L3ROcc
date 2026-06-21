@@ -42,6 +42,13 @@ from third_party.pi3.pi3.utils.geometry import depth_edge
 # Basis change from OpenCV camera frame to OpenGL render frame: p_render = C @ p_opencv.
 R_OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
 
+# Base-frame canonicalization for LeRobot (opencv) so all datasets share one base convention
+# (forward=+y, lateral=±x, up=+z). The LeRobot hand-eye base is ROS-style (forward=+x); a +90°
+# yaw about base z maps its forward +x -> +y to match the N1 (opengl, post-C) convention.
+R_BASE_CANON_OPENCV = np.array(
+    [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
+)
+
 
 class DataGenerator:
     """
@@ -880,10 +887,41 @@ class DataGenerator:
                 write_ply(occ_frame_traj, traj_occ_colors, traj_occ_ply_path)
                 print(f"Saved OCC-frame Camera Trajectory to {traj_occ_ply_path}")
 
+        # Combined aligned-vs-GT trajectory ply (both in the dataset's GT world frame):
+        # blue = GT-world aligned Pi3X camera centers, red = GT (action) camera centers.
+        # They share a start point (frame-0 anchored) and diverge by Pi3X drift. Both are
+        # set by run_pipeline; skipped when GT was unavailable.
+        aligned_world = getattr(self, "aligned_camera_pose_world", None)
+        gt_world = getattr(self, "gt_camera_pose_world", None)
+        if aligned_world is not None and gt_world is not None:
+            aligned_world = np.asarray(aligned_world, dtype=np.float32)
+            gt_world = np.asarray(gt_world, dtype=np.float32)
+            if (
+                aligned_world.ndim == 3
+                and aligned_world.shape[-2:] == (4, 4)
+                and gt_world.ndim == 3
+                and gt_world.shape[-2:] == (4, 4)
+            ):
+                a_ctr = aligned_world[:, :3, 3]
+                g_ctr = gt_world[:, :3, 3]
+                combo_pts = np.vstack([a_ctr, g_ctr]).astype(np.float32)
+                combo_colors = np.zeros_like(combo_pts, dtype=np.float32)
+                combo_colors[: len(a_ctr), 2] = 1.0  # Blue: aligned Pi3X trajectory
+                combo_colors[len(a_ctr) :, 0] = 1.0  # Red: GT (action) trajectory
+                combo_ply_path = os.path.join(
+                    os.path.dirname(paths["ply"]),
+                    "camera_trajectory_aligned_vs_gt.ply",
+                )
+                write_ply(combo_pts, combo_colors, combo_ply_path)
+                print(
+                    f"Saved aligned-vs-GT Camera Trajectory (blue=Pi3X, red=GT) to "
+                    f"{combo_ply_path}"
+                )
+
         np.savez_compressed(
             paths["global_occ"], data=occ_pcd_to_save.astype(np.float32)
         )
-        print(f"Saved Global Data to {paths['global_occ']}")
+        print(f"Saved Last Frame Occ Data to {paths['global_occ']}")
 
     def save_sequence_data(self, paths, sparse_occ_indices, packed_mask_data):
         """
@@ -1097,15 +1135,20 @@ class DataGenerator:
         grid_dims = self.config["occ_size"]  # (H, W, D)
         device = self.device
 
-        # Camera-convention basis change (per-dataset, from the loader's extrinsic_convention):
-        # "opengl" (InternData-N1 rendered extrinsics) needs C=R_OPENCV_TO_OPENGL folded into the
-        # cam->base rotation (R_eff = R_c2b @ C), else base/OCC flips 180 deg about X. "opencv"
-        # (Lerobot hand-eye) / None is already OpenCV, no flip. Folding into T_cam2base keeps every
-        # R_c2b path consistent: point cloud, last-frame trajectory, and check_visual_occ rays.
+        # Per-dataset base-frame normalization (from the loader's extrinsic_convention), folded
+        # into T_cam2base so every R_c2b path stays consistent (point cloud, last-frame
+        # trajectory, check_visual_occ rays) and all datasets land in ONE canonical base frame
+        # (forward=+y, lateral=±x, up=+z) — letting a single pc_range / occ_size serve both:
+        #   - "opengl" (N1 rendered extrinsics): camera-side C=R_OPENCV_TO_OPENGL (R_eff=R_c2b @ C),
+        #     else base/OCC flips 180 deg about X; this already yields forward=+y.
+        #   - "opencv" (LeRobot hand-eye): base is ROS-style forward=+x, so left-multiply a +90 deg
+        #     yaw R_BASE_CANON_OPENCV (R_eff = Rz90 @ R_c2b) to bring forward +x -> +y.
         if T_cam2base is not None:
             T_cam2base = np.array(T_cam2base, dtype=np.float32)
             if extrinsic_convention == "opengl":
                 T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
+            elif extrinsic_convention == "opencv":
+                T_cam2base[:3, :3] = R_BASE_CANON_OPENCV @ T_cam2base[:3, :3]
 
         # Lists for storage
         all_sparse_indices_occ = []
@@ -1152,10 +1195,11 @@ class DataGenerator:
 
         # Per-frame ground-tilt diagnostic on the leveled pcd_points_base (read-only): with
         # leveling on every sampled frame should read ~0. Sample evenly-spaced frames (incl.
-        # 0 and last).
+        # 0 and last). Only meaningful for the z-deskew path, so skip it (no diag prints)
+        # when z_deskew is off.
         diag_frames = (
             set(np.linspace(0, total_frames - 1, min(total_frames, 25)).astype(int).tolist())
-            if total_frames > 0
+            if (z_deskew and total_frames > 0)
             else set()
         )
         diag_tilts = {}

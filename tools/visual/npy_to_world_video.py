@@ -21,8 +21,6 @@ def numerical_sort(value):
 
 
 if __name__ == "__main__":
-    mlab.options.offscreen = True
-
     parse = ArgumentParser()
     # Path to 'npy_sequence_world' directory (Expected data shape: N x 7)
     parse.add_argument(
@@ -41,11 +39,21 @@ if __name__ == "__main__":
         type=str,
         default="/L3ROcc/configs/config.yaml",
     )
+    parse.add_argument(
+        "--offscreen",
+        action="store_true",
+        help="Force VTK offscreen rendering. Requires OSMesa (osmesa.dll) on Windows; "
+             "otherwise leave unset to render in a real GPU window.",
+    )
 
     args = parse.parse_args()
     input_dir = args.input_dir
     output_video = args.output_video
     config_path = args.config
+
+    # On Windows without OSMesa, offscreen rendering fails. Default to a real
+    # window context (screenshots still work); opt into offscreen explicitly.
+    mlab.options.offscreen = args.offscreen
 
     voxel_size = 0.05
     if os.path.exists(config_path):
@@ -60,10 +68,10 @@ if __name__ == "__main__":
 
     print(f"Found {len(files)} frames. Generating Real-Color video...")
 
-    width, height = 800, 800
-    figure = mlab.figure(size=(width, height), bgcolor=(1, 1, 1))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(output_video, fourcc, 30.0, (width, height))
+    figure = mlab.figure(size=(800, 800), bgcolor=(1, 1, 1))
+    locked_cam = None        # camera state locked after the first frame
+    writer = None            # lazy init with the real screenshot dimensions
+    writer_size = None
 
     for i, file_path in enumerate(files):
         mlab.clf()
@@ -157,26 +165,56 @@ if __name__ == "__main__":
                 scale_factor=0.05,
             )
 
-        # 5. Camera Configuration
-        # Note: View parameters are obtained via visual_sample_frame.py
-        # -------------------------------------------------
-        cam = figure.scene.camera
-        cam.position = [-5.682662716850507, -2.3581944446045062, 1.1414235902534458]
-        cam.focal_point = [0.3545984131007137, 0.24273155461184365, -0.1329467104813029]
-        cam.view_angle = 30.0
-        cam.view_up = [0.24965504712039718, -0.826617329042394, -0.5043571638969063]
-        cam.clipping_range = [1.851463337952073, 12.81058369015543]
-        cam.compute_view_plane_normal()
-
-        figure.scene.render()
+        # 5. Camera: auto-fit on the first frame, then lock the viewpoint so the
+        # whole sequence is rendered from one stable angle (no hardcoded pose).
+        if locked_cam is None:
+            mlab.view()
+            figure.scene.render()
+            cam = figure.scene.camera
+            locked_cam = {
+                "position": list(cam.position),
+                "focal_point": list(cam.focal_point),
+                "view_up": list(cam.view_up),
+                "view_angle": cam.view_angle,
+                "clipping_range": list(cam.clipping_range),
+            }
+            print(f"Camera locked: pos={np.round(locked_cam['position'], 3)}")
+        else:
+            cam = figure.scene.camera
+            cam.position = locked_cam["position"]
+            cam.focal_point = locked_cam["focal_point"]
+            cam.view_up = locked_cam["view_up"]
+            cam.view_angle = locked_cam["view_angle"]
+            cam.clipping_range = locked_cam["clipping_range"]
+            cam.compute_view_plane_normal()
+            figure.scene.render()
 
         img_array = mlab.screenshot(figure=figure, mode="rgb", antialiased=True)
         img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+        # Lazy-init the writer with the real screenshot size (DPI may differ from 800).
+        if writer is None:
+            h, w = img_bgr.shape[:2]
+            out_path = output_video
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(out_path, fourcc, 30.0, (w, h))
+            if not writer.isOpened():
+                out_path = os.path.splitext(output_video)[0] + ".avi"
+                fourcc = cv2.VideoWriter_fourcc(*"XVID")
+                writer = cv2.VideoWriter(out_path, fourcc, 30.0, (w, h))
+            writer_size = (w, h)
+            output_video = out_path
+            print(f"VideoWriter: {w}x{h}  ->  {out_path}")
+
+        wr_w, wr_h = writer_size
+        if img_bgr.shape[1] != wr_w or img_bgr.shape[0] != wr_h:
+            img_bgr = cv2.resize(img_bgr, (wr_w, wr_h))
         writer.write(img_bgr)
 
         if i % 10 == 0:
             print(f"Processed {i}/{len(files)}")
 
-    writer.release()
+    if writer is not None:
+        writer.release()
     mlab.close(all=True)
     print(f"Real-Color Fused Video saved to: {output_video}")

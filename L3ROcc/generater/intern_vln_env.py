@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from L3ROcc.base import DataGenerator
+from L3ROcc.base import DataGenerator, R_OPENCV_TO_OPENGL
 
 
 def _quat_wxyz_to_R(q):
@@ -35,8 +35,10 @@ class InternNavDataGenerator(DataGenerator):
 
     This class handles the pipeline of 3D reconstruction, metric-scale handling, optional
     Lerobot z-axis deskew, occupancy generation, and safe metadata updates using file locking.
-    GT-based alignment (``align_with_gt_scale`` / ``align_to_world`` / ``get_gt_poses``) is kept
-    for offline diagnosis only and is not part of the data-processing pipeline.
+    GT-based alignment (``align_with_gt_scale`` / ``align_to_world``) is kept for offline
+    diagnosis only and is not part of the data-processing pipeline. ``get_gt_poses`` is the
+    exception: the pipeline reads it to frame-0 anchor the saved ``camera_extrinsic_occ`` into
+    the dataset's GT world frame (see ``align_camera_poses_to_gt_world``).
     """
 
     def __init__(
@@ -301,7 +303,16 @@ class InternNavDataGenerator(DataGenerator):
                 for p in df["action"]:
                     if p is None:
                         continue
-                    mat = np.asarray(p, dtype=np.float64)
+                    # N1 parquet stores each action cell as an object array of 4 row-vectors
+                    # (dtype=object, shape (4,)), not a regular (4, 4) array, so a direct
+                    # np.asarray(p, dtype=float64) raises "setting an array element with a
+                    # sequence". Parse row-by-row (same idea as adapter's _reshape_matrix).
+                    try:
+                        mat = np.array([np.asarray(r, dtype=np.float64) for r in p])
+                    except Exception:
+                        continue
+                    if mat.shape != (4, 4) and mat.size == 16:
+                        mat = mat.reshape(4, 4)
                     if mat.shape == (4, 4):
                         gt_poses_np.append(mat)
                 if gt_poses_np:
@@ -309,7 +320,13 @@ class InternNavDataGenerator(DataGenerator):
 
             # --- Schema B: lerobot rosbag observation.state (14-dim) + hand-eye ---
             if "observation.state" in df.columns:
-                state = np.stack(df["observation.state"].values).astype(np.float64)
+                # Be robust to object-array cells (each row a sequence) like Schema A above.
+                try:
+                    state = np.array(
+                        [np.asarray(r, dtype=np.float64) for r in df["observation.state"]]
+                    )
+                except Exception:
+                    return None
                 if state.ndim != 2 or state.shape[1] < 10:
                     return None
                 p_body = state[:, 0:3]
@@ -391,6 +408,52 @@ class InternNavDataGenerator(DataGenerator):
         except Exception as e:
             print(f"[Subclass Error] Failed to load GT poses: {e}")
             return None
+
+    def align_camera_poses_to_gt_world(
+        self, camera_pose, gt_poses, extrinsic_convention
+    ):
+        """Frame-0 anchored rigid placement of the Pi3X camera poses into the dataset's GT
+        world frame, so the reconstructed trajectory can be overlaid on the GT trajectory.
+
+        Anchors model frame 0 to ``gt_poses[0]`` and keeps the model's own relative motion
+        and metric scale (no Kabsch/Sim3 optimization). Only ``gt_poses[0]`` is used, so a GT
+        of length 1 (or a length differing from the model) is fine. The camera-convention
+        bridge C (OpenCV->OpenGL ``diag(1,-1,-1)``) is applied for ``"opengl"`` (N1 render
+        extrinsics); ``"opencv"`` (Lerobot hand-eye) / other uses identity.
+
+        For each frame ``i`` (``P=camera_pose``, ``A0=gt_poses[0]``)::
+
+            aligned[i] = A0 @ C4 @ inv(P[0]) @ P[i] @ C4
+
+        which yields ``aligned[0] == A0`` exactly (``C4 @ C4 == I``).
+
+        Args:
+            camera_pose (np.ndarray): (N, 4, 4) model camera poses (cam->world, scaled).
+            gt_poses (np.ndarray or None): (M, 4, 4) GT camera poses (cam->world). Only
+                row 0 is used as the world anchor.
+            extrinsic_convention (str or None): ``"opengl"`` -> apply C; else identity.
+
+        Returns:
+            np.ndarray or None: (N, 4, 4) poses in the GT world frame, or None when GT is
+            unusable (caller falls back to the model-world poses).
+        """
+        if gt_poses is None or len(gt_poses) == 0:
+            return None
+        if camera_pose is None or len(camera_pose) == 0:
+            return None
+
+        P = np.asarray(camera_pose, dtype=np.float64)
+        A0 = np.asarray(gt_poses[0], dtype=np.float64)
+
+        C4 = np.eye(4, dtype=np.float64)
+        if extrinsic_convention == "opengl":
+            C4[:3, :3] = R_OPENCV_TO_OPENGL
+
+        P0_inv = np.linalg.inv(P[0])
+        # aligned[i] = A0 @ C4 @ (P0_inv @ P[i]) @ C4
+        rel = np.einsum("ij,njk->nik", P0_inv, P)  # (N, 4, 4) cam0<-cami in model frame
+        aligned = np.einsum("ij,jk,nkl,lm->nim", A0, C4, rel, C4)
+        return aligned.astype(np.float32)
 
     def compute_trajectory_scale(self, poses_gt, poses_pred):
         """
@@ -1200,8 +1263,8 @@ class InternNavDataGenerator(DataGenerator):
         # No align_to_world (matches exp_coord_align): coordinate alignment is done by the
         # camera-convention basis change C in compute_sequence_data (per extrinsic_convention).
         # Scale trusts metric_head plus the config correction factor; apply it in place to pcd and
-        # camera translations. align_to_world / align_with_gt_scale / get_gt_poses are kept for
-        # offline GT diagnosis only.
+        # camera translations. align_to_world / align_with_gt_scale are kept for offline GT
+        # diagnosis only; get_gt_poses is used below to frame-0 anchor the saved camera extrinsic.
         s = float(self.metric_scale_correction)
         pcd = self.pcd = pcd * s
         self.camera_pose[:, :3, 3] *= s
@@ -1240,6 +1303,29 @@ class InternNavDataGenerator(DataGenerator):
         # Save sequence data
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
+
+        # Camera extrinsic: frame-0 anchored rigid placement into the dataset's GT world frame
+        # (N1=action[0], Lerobot=state-reconstructed GT[0]) so the saved trajectory overlays the
+        # GT. Only the saved poses are replaced; self.camera_pose stays in the model world frame
+        # because the OCC stage above (world->camera per frame) depends on the original poses.
+        gt_poses = self.get_gt_poses(input_path)
+        aligned_poses = self.align_camera_poses_to_gt_world(
+            self.camera_pose, gt_poses, extrinsic_convention
+        )
+        # Stash both (in the GT world frame) so save_global_data can write a combined
+        # aligned-vs-GT trajectory ply for visual inspection.
+        self.aligned_camera_pose_world = aligned_poses
+        self.gt_camera_pose_world = gt_poses
+        if aligned_poses is not None:
+            all_camera_poses = [[row for row in pose] for pose in aligned_poses]
+            print(
+                "[extrinsic] camera_extrinsic_occ aligned to dataset GT world "
+                "(frame-0 anchored)."
+            )
+        else:
+            print(
+                "[extrinsic] GT poses unavailable; keeping model-world camera poses (scaled)."
+            )
 
         # Update metadata
         self.update_metadata(paths, all_camera_poses, all_camera_intrinsics, input_path)
