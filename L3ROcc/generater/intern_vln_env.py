@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from L3ROcc.base import DataGenerator, R_OPENCV_TO_OPENGL
+from L3ROcc.utils import voxels_to_pcd
 
 
 def _quat_wxyz_to_R(q):
@@ -1209,6 +1210,138 @@ class InternNavDataGenerator(DataGenerator):
                 print(f"Error updating {file_path}: {e}")
                 break
 
+    def save_world_fusion_sequence(self, final_occ, save_dir, world_transform=None):
+        """Save per-frame world-fused ``(N, 7)`` npy for ``tools/visual/npy_to_world_video.py``.
+
+        Reuses the data pipeline's already-computed canonical-ego OCC (``final_occ`` from
+        ``compute_sequence_data``) instead of recomputing OCC in the raw camera frame — the
+        latter (as ``visual_pipeline`` does) would crop along the wrong axis because
+        ``pc_range`` is defined in the canonical base frame (forward=+y), not the OpenCV
+        camera frame. Each frame fuses three labeled blocks ``[x, y, z, r, g, b, label]``:
+
+          - label 0: background dense point cloud (``self.pcd`` + ``self.pcd_color``)
+          - label 1: camera trajectory up to frame ``i`` (blue)
+          - label 2: temporally accumulated visible OCC (gray)
+
+        All points are first expressed in the model-world frame, then rigid-transformed by
+        ``world_transform`` (M) into the dataset GT world frame — the same frame as the saved
+        ``camera_extrinsic_occ`` — so the visualization overlays the GT trajectory. Writes
+        only ``merge_npy_sequence_world/frame_XXXX_world.npy`` (no cam/ply/solo-occ outputs).
+
+        Args:
+            final_occ (np.ndarray): (M, 4) sparse ``[frame, vx, vy, vz]`` visible OCC voxel
+                indices in the canonical ego/base frame (``compute_sequence_data`` return).
+            save_dir (str): Trajectory output dir (usually ``self.save_path``).
+            world_transform (np.ndarray or None): 4x4 model-world -> GT-world rigid. None keeps
+                the model-world frame (GT unavailable).
+        """
+        out_dir = os.path.join(save_dir, "merge_npy_sequence_world")
+        os.makedirs(out_dir, exist_ok=True)
+
+        total_frames = len(self.camera_pose)
+        final_occ = np.asarray(final_occ)
+        frame_col = (
+            final_occ[:, 0].astype(np.int64)
+            if final_occ.size
+            else np.zeros((0,), dtype=np.int64)
+        )
+
+        def _apply_M(xyz):
+            """Apply the 4x4 model-world -> GT-world rigid to (K, 3) points."""
+            xyz = np.asarray(xyz, dtype=np.float32)
+            if world_transform is None or len(xyz) == 0:
+                return xyz
+            M = np.asarray(world_transform, dtype=np.float64)
+            h = np.concatenate([xyz.astype(np.float64), np.ones((len(xyz), 1))], axis=1)
+            return (h @ M.T)[:, :3].astype(np.float32)
+
+        # Background block is constant across frames: build it once (mapped to GT world).
+        bg_world = np.asarray(self.pcd, dtype=np.float32)
+        if bg_world.ndim == 2 and bg_world.shape[1] == 4:
+            bg_world = bg_world[:, :3]
+        if getattr(self, "pcd_color", None) is not None:
+            bg_color = np.asarray(self.pcd_color, dtype=np.float32)
+        else:
+            bg_color = np.ones_like(bg_world) * 0.7
+        min_len = min(len(bg_world), len(bg_color))
+        bg_block = np.concatenate(
+            [
+                _apply_M(bg_world[:min_len]),
+                bg_color[:min_len],
+                np.zeros((min_len, 1), dtype=np.float32),  # label 0
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        # Reset temporal accumulation buffer (same semantics as visual_pipeline).
+        self.occ_history_buffer.clear()
+
+        for i in range(total_frames):
+            current_pose = self.camera_pose[i]
+
+            # --- OCC (label 2): canonical ego voxels -> cam -> model world ---
+            sel = final_occ[frame_col == i, 1:4] if final_occ.size else np.zeros((0, 3))
+            if len(sel) > 0:
+                ego_pts = voxels_to_pcd(
+                    sel.astype(np.float32), self.voxel_size, self.pc_range
+                )
+                # base -> cam: P_cam = R_eff.T @ P_base  (row form: P_cam = P_base @ R_eff)
+                if getattr(self, "occ_per_frame_T_cam2base", None) is not None:
+                    R_eff = np.asarray(
+                        self.occ_per_frame_T_cam2base[i], dtype=np.float32
+                    )[:3, :3]
+                    cam_pts = ego_pts @ R_eff
+                else:
+                    cam_pts = ego_pts
+                occ_world = self.convert_pointcloud_camera_to_world(cam_pts, current_pose)
+            else:
+                occ_world = np.zeros((0, 3), dtype=np.float32)
+
+            save_flag = i % self.history_step == 0
+            _, local_occ_world = self.get_temporal_occ(
+                occ_world, current_pose, save_to_history=save_flag
+            )
+            local_occ_world = np.asarray(local_occ_world, dtype=np.float32)
+            if local_occ_world.ndim == 2 and local_occ_world.shape[1] == 4:
+                local_occ_world = local_occ_world[:, :3]
+
+            # --- Trajectory (label 1) ---
+            traj_world = np.asarray(self.camera_pose[: i + 1, :3, 3], dtype=np.float32)
+            if len(traj_world) > 0:
+                traj_block = np.concatenate(
+                    [
+                        _apply_M(traj_world),
+                        np.tile([0.0, 0.0, 1.0], (len(traj_world), 1)),  # blue
+                        np.ones((len(traj_world), 1), dtype=np.float32),  # label 1
+                    ],
+                    axis=1,
+                ).astype(np.float32)
+            else:
+                traj_block = np.zeros((0, 7), dtype=np.float32)
+
+            # --- OCC block ---
+            if len(local_occ_world) > 0:
+                occ_block = np.concatenate(
+                    [
+                        _apply_M(local_occ_world),
+                        np.tile([0.5, 0.5, 0.5], (len(local_occ_world), 1)),  # gray
+                        np.full((len(local_occ_world), 1), 2, dtype=np.float32),  # label 2
+                    ],
+                    axis=1,
+                ).astype(np.float32)
+            else:
+                occ_block = np.zeros((0, 7), dtype=np.float32)
+
+            final_npy = np.concatenate(
+                [bg_block, traj_block, occ_block], axis=0
+            ).astype(np.float32)
+            np.save(os.path.join(out_dir, f"frame_{i:04d}_world.npy"), final_npy)
+
+            if i % 10 == 0:
+                print(f"[world-fusion] frame {i}/{total_frames}")
+
+        print(f"[world-fusion] saved {total_frames} frames -> {out_dir}")
+
     def run_pipeline(
         self,
         input_path,
@@ -1220,6 +1353,7 @@ class InternNavDataGenerator(DataGenerator):
         T_cam2base=None,
         extrinsic_convention=None,
         z_deskew=False,
+        save_world_fusion=False,
     ):
         """
         Executes the full data generation pipeline:
@@ -1247,6 +1381,10 @@ class InternNavDataGenerator(DataGenerator):
                 (frame-0 gravity fold + per-frame leveling) and write the per-frame deskew
                 rotation to ``data/chunk-000/episode_000000.parquet``. Default False. N1
                 (opengl) is unaffected.
+            save_world_fusion (bool, optional): Also write per-frame world-fused ``(N, 7)`` npy
+                to ``merge_npy_sequence_world/`` for ``tools/visual/npy_to_world_video.py``.
+                Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion
+                in the dataset GT world frame. Default False.
 
         Returns:
             None
@@ -1340,3 +1478,22 @@ class InternNavDataGenerator(DataGenerator):
         if pcd_save:
             # Save global data
             self.save_global_data(paths)
+
+        # Optional: per-frame world-fused (N, 7) npy for npy_to_world_video.py. Reuses the
+        # in-memory OCC (arr_4d_occ) / pcd / poses — no second inference. Map the fusion into
+        # the dataset GT world frame with the SAME frame-0 anchor as camera_extrinsic_occ:
+        #   M = A0 @ C4 @ inv(P0)   (A0=gt_poses[0], P0=self.camera_pose[0],
+        #   C4=R_OPENCV_TO_OPENGL for "opengl" else I) — matching align_camera_poses_to_gt_world.
+        # GT unavailable -> M=None (keep model world frame).
+        if save_world_fusion:
+            world_M = None
+            if gt_poses is not None and len(gt_poses) > 0:
+                P0 = np.asarray(self.camera_pose[0], dtype=np.float64)
+                A0 = np.asarray(gt_poses[0], dtype=np.float64)
+                C4 = np.eye(4, dtype=np.float64)
+                if extrinsic_convention == "opengl":
+                    C4[:3, :3] = R_OPENCV_TO_OPENGL
+                world_M = A0 @ C4 @ np.linalg.inv(P0)
+            self.save_world_fusion_sequence(
+                arr_4d_occ, self.save_path, world_transform=world_M
+            )

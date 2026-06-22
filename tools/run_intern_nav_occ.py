@@ -195,6 +195,7 @@ def run_dataset_pipeline(args):
                 T_cam2base=cam_extrinsics,
                 extrinsic_convention=cam_convention,
                 z_deskew=z_deskew,
+                save_world_fusion=args.save_world_fusion,
             )
 
             print("Processing successful!")
@@ -291,6 +292,17 @@ if __name__ == "__main__":
         default=False,
         metavar="true|false",
         help="Use Poisson mesh instead of raw point cloud. Default: false.",
+    )
+    parser.add_argument(
+        "--save_world_fusion",
+        type=_parse_bool,
+        default=False,
+        metavar="true|false",
+        help="Also write per-frame world-fused (N, 7) npy to "
+        "<trajectory>/merge_npy_sequence_world/ for tools/visual/npy_to_world_video.py. "
+        "Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion in "
+        "the dataset GT world frame. Only produced together with (re)generation, so use "
+        "--overwrite true to regenerate fusion for already-processed trajectories. Default: false.",
     )
 
     args = parser.parse_args()
