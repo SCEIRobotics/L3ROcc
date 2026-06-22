@@ -22,17 +22,20 @@ def numerical_sort(value):
 
 if __name__ == "__main__":
     parse = ArgumentParser()
+    from pathlib import Path
+    default_input_dir = str(Path(r'G:\vln_real_data\l3rocc_data\for_ref\InternData-N1_vis_exp_00\trajectory_000002\merge_npy_sequence_world'))
+    default_output_video = default_input_dir + ".mp4"
     # Path to 'npy_sequence_world' directory (Expected data shape: N x 7)
     parse.add_argument(
         "--input_dir",
         type=str,
-        default="/outputs/office_1/npy_sequence_world",
+        default=default_input_dir,
     )
     # Output path (Rename to prevent overwriting existing files)
     parse.add_argument(
         "--output_video",
         type=str,
-        default="/outputs/office_1/real_color_world.mp4",
+        default=default_output_video,
     )
     parse.add_argument(
         "--config",

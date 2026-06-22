@@ -167,6 +167,17 @@ The InternData-N1 generator now supports the same decoupled RGB / intrinsic / de
 inputs as Mode A/B. Intrinsic priority: `--condit_intr_path` (external info.json) >
 `observation.camera_intrinsic` column in parquet > DLT fallback.
 
+> **World-fusion visualization (`--save_world_fusion true`)**: additionally writes per-frame fused `(N, 7)` `[x, y, z, r, g, b, label]` arrays to `<trajectory>/merge_npy_sequence_world/frame_XXXX_world.npy` for `tools/visual/npy_to_world_video.py`. Each frame fuses three labeled blocks — background point cloud (`label 0`), camera trajectory up to that frame (`label 1`), and temporally accumulated visible occupancy (`label 2`) — all rigidly placed into the dataset **GT world frame** with the *same* frame-0 anchor as `observation.camera_extrinsic_occ`, so the fused occupancy overlays the GT trajectory. It **reuses the in-memory OCC / point cloud / poses (no second inference)** and is only emitted alongside (re)generation — pass `--overwrite true` to regenerate the fusion for already-processed trajectories. Default `false`.
+
+```bash
+# InternData-N1, RGB-only, also emit world-fusion frames for npy_to_world_video.py
+python tools/run_intern_nav_occ.py --dataset_root data/examples/small_vln_n1/traj_data \
+    --output_root data/examples/small_vln_n1_4/traj_data \
+    --model_type pi3x --use_intrinsic false --use_depth false \
+    --use_z_deskew false --pcd_save true --overwrite true --mesh false \
+    --save_world_fusion true
+```
+
 **Model + input matrix:**
 
 | `--model_type` | `--use_intrinsic` | `--use_depth` | Description |
@@ -193,7 +204,7 @@ Located in `L3ROcc/generater/`, the project includes two core generators. Both s
 
 Parameters can be tuned in `L3ROcc/configs/config.yaml`:
 
-* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]` in the **canonical robot base frame** — forward = +y, lateral = ±x, up = +z, origin at the per-frame camera. A single box (forward depth 5.6 m, lateral ±2 m, height [−0.6, 1.8] m) serves all datasets because both are normalized into this one frame: N1 (OpenGL) folds `C = diag(1, -1, -1)` into `T_cam2base`, and LeRobot (OpenCV, ROS-style forward = +x) additionally folds a +90° base yaw `R_BASE_CANON_OPENCV` to map its forward +x → +y (see `compute_sequence_data`). This keeps `occ_size` identical across datasets so downstream consumers (visualization, training) need no per-dataset shape handling.
+* **`pc_range`**: Spatial clipping and perception range `[x_min, y_min, z_min, x_max, y_max, z_max]` in the **canonical robot base frame** — forward = +y, lateral = ±x, up = +z, origin at the per-frame camera. A single box (forward depth 5.6 m, lateral ±2 m, height **[−1.8, 0.6] m**) serves all datasets because both are normalized into this one frame: N1 (OpenGL) folds `C = diag(1, -1, -1)` into `T_cam2base`, and LeRobot (OpenCV, ROS-style forward = +x) additionally folds a +90° base yaw `R_BASE_CANON_OPENCV` to map its forward +x → +y (see `compute_sequence_data`). The **z range is intentionally asymmetric — 1.8 m down, 0.6 m up**: `camera → base` is **rotation-only** (the camera stays at the base origin `z = 0`, see `convert_pointcloud_camera_to_base`; the ray origin in `check_visual_occ` is likewise `(0, 0, 0)`), and the head camera is mounted above the floor looking forward-down, so the ground lies *below* the camera at `z = −(camera height)`. Extending 1.8 m downward captures the floor for camera mount heights up to ~1.8 m (real trajectories range ≈ 0.4–1.3 m); a too-shallow lower bound (e.g. the previous `z_min = −0.6`) clips the ground out of the occupancy for any camera mounted higher than 0.6 m. This keeps `occ_size` identical across datasets so downstream consumers (visualization, training) need no per-dataset shape handling.
 * **`voxel_size`**: Base size for occupancy voxels (default 0.04m), directly related to the sparsity of the occupancy voxel map.
 * **`occ_size`**: Number of voxel grids in each spatial dimension, derived from `(pc_range_max - pc_range_min) / voxel_size` with no independent configuration.
 * **`metric_scale_correction`**: GT-free metric scale factor applied to the Pi3X output. Default `1.0` (trust `metric_head`); set ~`1.08` to compensate the measured ~8% under-scale on real data.
@@ -308,7 +319,7 @@ A variety of scripts are provided in `tools/visual/` for visualization and analy
 |--------|-------------|
 | `visual_simple_frame_npy.py` | Interactive single-frame debugger. Loads individual voxel .npy files, supports interactive view rotation in Mayavi, and prints real-time camera pose parameters (Position/Focal/ViewUp) to determine the optimal fixed view for video rendering. |
 | `visual_simple_frame_npz.py` | Fast sparse matrix viewer. Directly reads compressed .npz  or .npy files to quickly verify the integrity of generated occupancy data without decompressing the entire sequence. |
-| `npy_to_world_video.py` | God's eye (World-View) fusion rendering. Generates third-person global reconstruction videos containing three key elements: true-color background point clouds, global camera trajectories , and accumulated occupancy grids . |
+| `npy_to_world_video.py` | God's eye (World-View) fusion rendering. Generates third-person global reconstruction videos containing three key elements: true-color background point clouds, global camera trajectories , and accumulated occupancy grids . Input frames come from `visual_pipeline` (`merge_npy_sequence_world.npy`) or, for InternData-N1 / LeRobot batch runs, from `--save_world_fusion true` (`merge_npy_sequence_world/frame_XXXX_world.npy`). |
 | `npy_to_occ_video.py` | Egocentric (First-Person) stylized rendering. Generates first-person videos with only local occupancy, using Morandi color palette for depth-gradient shading to showcase pure spatial geometric structures. |
 | `video_composer_to_3.py` | 3-Panel panoramic composer. Horizontally stitches three video streams to generate the final demo video, typically including: original RGB input video, world-view fusion video, and local occupancy video. |
 
