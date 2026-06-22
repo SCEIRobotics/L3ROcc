@@ -39,16 +39,6 @@ from third_party.pi3.pi3.utils.basic import (  # Assuming you have a helper func
 # from pi3.utils.geometry import homogenize_points
 from third_party.pi3.pi3.utils.geometry import depth_edge
 
-# Basis change from OpenCV camera frame to OpenGL render frame: p_render = C @ p_opencv.
-R_OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
-
-# Base-frame canonicalization for LeRobot (opencv) so all datasets share one base convention
-# (forward=+y, lateral=±x, up=+z). The LeRobot hand-eye base is ROS-style (forward=+x); a +90°
-# yaw about base z maps its forward +x -> +y to match the N1 (opengl, post-C) convention.
-R_BASE_CANON_OPENCV = np.array(
-    [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32
-)
-
 
 class DataGenerator:
     """
@@ -127,6 +117,8 @@ class DataGenerator:
         self.history_step = self.config["history_step"]
         # GT-free 世界系对齐的 metric 尺度修正系数（默认 1.0 = 直接信任 metric_head）。
         self.metric_scale_correction = self.config.get("metric_scale_correction", 1.0)
+        self.R_opencv_to_opengl = np.array(self.config["R_OPENCV_TO_OPENGL"], dtype=np.float32)
+        self.R_base_canon_opencv = np.array(self.config["R_BASE_CANON_OPENCV"], dtype=np.float32)
         self.occ_history_buffer = deque(
             maxlen=self.history_len
         )  # Fixed-length queue for sliding window
@@ -887,34 +879,42 @@ class DataGenerator:
                 write_ply(occ_frame_traj, traj_occ_colors, traj_occ_ply_path)
                 print(f"Saved OCC-frame Camera Trajectory to {traj_occ_ply_path}")
 
-        # Combined aligned-vs-GT trajectory ply (both in the dataset's GT world frame):
-        # blue = GT-world aligned Pi3X camera centers, red = GT (action) camera centers.
-        # They share a start point (frame-0 anchored) and diverge by Pi3X drift. Both are
-        # set by run_pipeline; skipped when GT was unavailable.
+        # Diagnostic trajectory ply (model vs GT, both in the dataset GT/N1 world frame).
+        # ``aligned_camera_pose_world`` is the GT-free saved camera_extrinsic_occ (in the model
+        # world frame); the camera-convention change alone does NOT place it in the N1 world, so
+        # for the overlay we rigidly anchor it onto the GT frame-0 (A0 @ inv(aligned[0]) @ aligned[i]).
+        # ``gt_camera_pose_world`` is the N1 action / Lerobot state-reconstructed GT trajectory.
+        # Both run_pipeline-set; skipped (no GT) when gt_camera_pose_world is None.
         aligned_world = getattr(self, "aligned_camera_pose_world", None)
         gt_world = getattr(self, "gt_camera_pose_world", None)
         if aligned_world is not None and gt_world is not None:
-            aligned_world = np.asarray(aligned_world, dtype=np.float32)
-            gt_world = np.asarray(gt_world, dtype=np.float32)
+            aligned_world = np.asarray(aligned_world, dtype=np.float64)
+            gt_world = np.asarray(gt_world, dtype=np.float64)
             if (
                 aligned_world.ndim == 3
                 and aligned_world.shape[-2:] == (4, 4)
                 and gt_world.ndim == 3
                 and gt_world.shape[-2:] == (4, 4)
+                and len(aligned_world) > 0
+                and len(gt_world) > 0
             ):
-                a_ctr = aligned_world[:, :3, 3]
+                # Rigidly place the GT-free model trajectory onto the GT frame-0 -> N1 world.
+                A0 = gt_world[0]
+                M = A0 @ np.linalg.inv(aligned_world[0])
+                placed = np.einsum("ij,njk->nik", M, aligned_world)
+                a_ctr = placed[:, :3, 3]
                 g_ctr = gt_world[:, :3, 3]
                 combo_pts = np.vstack([a_ctr, g_ctr]).astype(np.float32)
                 combo_colors = np.zeros_like(combo_pts, dtype=np.float32)
-                combo_colors[: len(a_ctr), 2] = 1.0  # Blue: aligned Pi3X trajectory
-                combo_colors[len(a_ctr) :, 0] = 1.0  # Red: GT (action) trajectory
+                combo_colors[: len(a_ctr), 2] = 1.0  # Blue: model trajectory (frame-0 anchored)
+                combo_colors[len(a_ctr) :, 0] = 1.0  # Red: GT (N1 action) trajectory
                 combo_ply_path = os.path.join(
                     os.path.dirname(paths["ply"]),
                     "camera_trajectory_aligned_vs_gt.ply",
                 )
                 write_ply(combo_pts, combo_colors, combo_ply_path)
                 print(
-                    f"Saved aligned-vs-GT Camera Trajectory (blue=Pi3X, red=GT) to "
+                    f"Saved model-vs-GT Camera Trajectory in N1 world (blue=model, red=GT) to "
                     f"{combo_ply_path}"
                 )
 
@@ -1146,9 +1146,9 @@ class DataGenerator:
         if T_cam2base is not None:
             T_cam2base = np.array(T_cam2base, dtype=np.float32)
             if extrinsic_convention == "opengl":
-                T_cam2base[:3, :3] = T_cam2base[:3, :3] @ R_OPENCV_TO_OPENGL
+                T_cam2base[:3, :3] = T_cam2base[:3, :3] @ self.R_opencv_to_opengl
             elif extrinsic_convention == "opencv":
-                T_cam2base[:3, :3] = R_BASE_CANON_OPENCV @ T_cam2base[:3, :3]
+                T_cam2base[:3, :3] = self.R_base_canon_opencv @ T_cam2base[:3, :3]
 
         # Lists for storage
         all_sparse_indices_occ = []

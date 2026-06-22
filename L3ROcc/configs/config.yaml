@@ -21,3 +21,7 @@
 # GT-free 世界系对齐：metric 尺度修正系数。默认 1.0 = 直接信任 Pi3X metric_head。
 # 实验测得真实(lerobot/ZED)数据 pred/sensor≈0.92(偏小~8%)，如需补偿可设 ~1.08；合成(N1)≈1.0 保持 1.0。
 'metric_scale_correction': 1.0
+# OpenCV->OpenGL 基变换矩阵：diag(1,-1,-1)，翻转 Y/Z 轴（绕相机 X 轴 180°）
+'R_OPENCV_TO_OPENGL': [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+# LeRobot(opencv) base 系规范化：+90° yaw，将 ROS forward+x 旋转到 canonical forward+y
+'R_BASE_CANON_OPENCV': [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]

@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from L3ROcc.base import DataGenerator, R_OPENCV_TO_OPENGL
+from L3ROcc.base import DataGenerator
 from L3ROcc.utils import voxels_to_pcd
 
 
@@ -36,10 +36,11 @@ class InternNavDataGenerator(DataGenerator):
 
     This class handles the pipeline of 3D reconstruction, metric-scale handling, optional
     Lerobot z-axis deskew, occupancy generation, and safe metadata updates using file locking.
-    GT-based alignment (``align_with_gt_scale`` / ``align_to_world``) is kept for offline
-    diagnosis only and is not part of the data-processing pipeline. ``get_gt_poses`` is the
-    exception: the pipeline reads it to frame-0 anchor the saved ``camera_extrinsic_occ`` into
-    the dataset's GT world frame (see ``align_camera_poses_to_gt_world``).
+    The full data-processing pipeline is **GT-free**: GT-based helpers (``get_gt_poses`` /
+    ``align_with_gt_scale`` / ``align_to_world``) are kept for offline diagnosis only. The saved
+    ``camera_extrinsic_occ`` is a GT-free rigid coordinate-system change of the model poses
+    (see ``transform_camera_poses_convention``): N1 applies the C=diag(1,-1,-1) basis change,
+    Lerobot leaves the poses unchanged.
     """
 
     def __init__(
@@ -410,50 +411,42 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Subclass Error] Failed to load GT poses: {e}")
             return None
 
-    def align_camera_poses_to_gt_world(
-        self, camera_pose, gt_poses, extrinsic_convention
-    ):
-        """Frame-0 anchored rigid placement of the Pi3X camera poses into the dataset's GT
-        world frame, so the reconstructed trajectory can be overlaid on the GT trajectory.
+    def transform_camera_poses_convention(self, camera_pose, extrinsic_convention):
+        """GT-free rigid coordinate-system change of the Pi3X camera poses (no GT, no frame-0
+        anchoring) — the saved ``camera_extrinsic_occ`` stays in the model world frame, only
+        re-expressed under the per-dataset camera convention.
 
-        Anchors model frame 0 to ``gt_poses[0]`` and keeps the model's own relative motion
-        and metric scale (no Kabsch/Sim3 optimization). Only ``gt_poses[0]`` is used, so a GT
-        of length 1 (or a length differing from the model) is fine. The camera-convention
-        bridge C (OpenCV->OpenGL ``diag(1,-1,-1)``) is applied for ``"opengl"`` (N1 render
-        extrinsics); ``"opencv"`` (Lerobot hand-eye) / other uses identity.
+        Applies the camera-convention bridge C (OpenCV->OpenGL ``diag(1,-1,-1)``) as a basis
+        change (conjugation) for ``"opengl"`` (N1 render extrinsics); ``"opencv"`` (Lerobot
+        hand-eye) / other uses identity, i.e. poses are returned unchanged. The model's own
+        relative motion and GT-free metric scale are preserved.
 
-        For each frame ``i`` (``P=camera_pose``, ``A0=gt_poses[0]``)::
+        For each frame ``i`` (``P=camera_pose``)::
 
-            aligned[i] = A0 @ C4 @ inv(P[0]) @ P[i] @ C4
+            aligned[i] = C4 @ P[i] @ C4
 
-        which yields ``aligned[0] == A0`` exactly (``C4 @ C4 == I``).
+        ``C4`` is a proper rotation (180 deg about camera X, ``det=+1``, ``C4 @ C4 == I``), so
+        the result is a valid SE(3) pose. For ``"opencv"`` (C4=I) this is exactly ``P[i]``.
 
         Args:
             camera_pose (np.ndarray): (N, 4, 4) model camera poses (cam->world, scaled).
-            gt_poses (np.ndarray or None): (M, 4, 4) GT camera poses (cam->world). Only
-                row 0 is used as the world anchor.
-            extrinsic_convention (str or None): ``"opengl"`` -> apply C; else identity.
+            extrinsic_convention (str or None): ``"opengl"`` -> apply C basis change; else identity.
 
         Returns:
-            np.ndarray or None: (N, 4, 4) poses in the GT world frame, or None when GT is
-            unusable (caller falls back to the model-world poses).
+            np.ndarray or None: (N, 4, 4) poses in the (convention-changed) model world frame,
+            or None when ``camera_pose`` is empty.
         """
-        if gt_poses is None or len(gt_poses) == 0:
-            return None
         if camera_pose is None or len(camera_pose) == 0:
             return None
 
         P = np.asarray(camera_pose, dtype=np.float64)
-        A0 = np.asarray(gt_poses[0], dtype=np.float64)
 
         C4 = np.eye(4, dtype=np.float64)
         if extrinsic_convention == "opengl":
-            C4[:3, :3] = R_OPENCV_TO_OPENGL
+            C4[:3, :3] = self.R_opencv_to_opengl
 
-        P0_inv = np.linalg.inv(P[0])
-        # aligned[i] = A0 @ C4 @ (P0_inv @ P[i]) @ C4
-        rel = np.einsum("ij,njk->nik", P0_inv, P)  # (N, 4, 4) cam0<-cami in model frame
-        aligned = np.einsum("ij,jk,nkl,lm->nim", A0, C4, rel, C4)
+        # aligned[i] = C4 @ P[i] @ C4 (basis change; identity when C4 == I)
+        aligned = np.einsum("ij,njk,kl->nil", C4, P, C4)
         return aligned.astype(np.float32)
 
     def compute_trajectory_scale(self, poses_gt, poses_pred):
@@ -1401,8 +1394,8 @@ class InternNavDataGenerator(DataGenerator):
         # No align_to_world (matches exp_coord_align): coordinate alignment is done by the
         # camera-convention basis change C in compute_sequence_data (per extrinsic_convention).
         # Scale trusts metric_head plus the config correction factor; apply it in place to pcd and
-        # camera translations. align_to_world / align_with_gt_scale are kept for offline GT
-        # diagnosis only; get_gt_poses is used below to frame-0 anchor the saved camera extrinsic.
+        # camera translations. align_to_world / align_with_gt_scale / get_gt_poses are kept for
+        # offline GT diagnosis only — the saved camera extrinsic below is GT-free (convention change).
         s = float(self.metric_scale_correction)
         pcd = self.pcd = pcd * s
         self.camera_pose[:, :3, 3] *= s
@@ -1442,27 +1435,27 @@ class InternNavDataGenerator(DataGenerator):
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
 
-        # Camera extrinsic: frame-0 anchored rigid placement into the dataset's GT world frame
-        # (N1=action[0], Lerobot=state-reconstructed GT[0]) so the saved trajectory overlays the
-        # GT. Only the saved poses are replaced; self.camera_pose stays in the model world frame
-        # because the OCC stage above (world->camera per frame) depends on the original poses.
-        gt_poses = self.get_gt_poses(input_path)
-        aligned_poses = self.align_camera_poses_to_gt_world(
-            self.camera_pose, gt_poses, extrinsic_convention
+        # Camera extrinsic: GT-free rigid coordinate-system change (no GT, no frame-0 anchoring).
+        # The saved poses stay in the model world frame, only re-expressed under the per-dataset
+        # camera convention (N1=C basis change diag(1,-1,-1); Lerobot=unchanged). self.camera_pose
+        # itself stays untouched because the OCC stage above (world->camera per frame) depends on it.
+        aligned_poses = self.transform_camera_poses_convention(
+            self.camera_pose, extrinsic_convention
         )
-        # Stash both (in the GT world frame) so save_global_data can write a combined
-        # aligned-vs-GT trajectory ply for visual inspection.
+        # Stash for save_global_data's diagnostic overlay. The saved extrinsic stays GT-free;
+        # GT (N1 action / Lerobot state) is read ONLY here to draw the diagnostic ply that
+        # overlays the model trajectory (frame-0 anchored into the N1 world) against the GT.
         self.aligned_camera_pose_world = aligned_poses
-        self.gt_camera_pose_world = gt_poses
+        self.gt_camera_pose_world = self.get_gt_poses(input_path)
         if aligned_poses is not None:
             all_camera_poses = [[row for row in pose] for pose in aligned_poses]
             print(
-                "[extrinsic] camera_extrinsic_occ aligned to dataset GT world "
-                "(frame-0 anchored)."
+                "[extrinsic] camera_extrinsic_occ: GT-free convention change "
+                f"({'C basis change' if extrinsic_convention == 'opengl' else 'unchanged'})."
             )
         else:
             print(
-                "[extrinsic] GT poses unavailable; keeping model-world camera poses (scaled)."
+                "[extrinsic] no camera poses to transform; keeping model-world camera poses (scaled)."
             )
 
         # Update metadata
@@ -1481,19 +1474,13 @@ class InternNavDataGenerator(DataGenerator):
 
         # Optional: per-frame world-fused (N, 7) npy for npy_to_world_video.py. Reuses the
         # in-memory OCC (arr_4d_occ) / pcd / poses — no second inference. Map the fusion into
-        # the dataset GT world frame with the SAME frame-0 anchor as camera_extrinsic_occ:
-        #   M = A0 @ C4 @ inv(P0)   (A0=gt_poses[0], P0=self.camera_pose[0],
-        #   C4=R_OPENCV_TO_OPENGL for "opengl" else I) — matching align_camera_poses_to_gt_world.
-        # GT unavailable -> M=None (keep model world frame).
+        # the SAME GT-free convention-changed frame as camera_extrinsic_occ:
+        #   M = C4   (C4=R_OPENCV_TO_OPENGL for "opengl" else I) — matching
+        #   transform_camera_poses_convention (aligned[i] = C4 @ P[i] @ C4, center = R_C @ center).
         if save_world_fusion:
-            world_M = None
-            if gt_poses is not None and len(gt_poses) > 0:
-                P0 = np.asarray(self.camera_pose[0], dtype=np.float64)
-                A0 = np.asarray(gt_poses[0], dtype=np.float64)
-                C4 = np.eye(4, dtype=np.float64)
-                if extrinsic_convention == "opengl":
-                    C4[:3, :3] = R_OPENCV_TO_OPENGL
-                world_M = A0 @ C4 @ np.linalg.inv(P0)
+            world_M = np.eye(4, dtype=np.float64)
+            if extrinsic_convention == "opengl":
+                world_M[:3, :3] = self.R_opencv_to_opengl
             self.save_world_fusion_sequence(
                 arr_4d_occ, self.save_path, world_transform=world_M
             )
