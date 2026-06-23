@@ -12,6 +12,31 @@ import yaml
 # This script generates a video from .npy files containing the initial point cloud,
 # Occupancy (OCC), and camera trajectory in the world coordinate system.
 
+# ---------------------------------------------------------------------------
+# To pick a viewpoint, run tools/visual/visual_world_frame_npy.py — it renders the
+# SAME world-frame .npy data as this video, so the camera transfers faithfully.
+# Adjust the view there and press "M" to print a ready-to-paste MANUAL_CAM block.
+# Do NOT pick from the voxel-index viewers (visual_simple_frame_npz/npy.py): their
+# coordinate scale and origin differ, so the camera will not transfer correctly.
+# Leave MANUAL_CAM as None to keep the automatic first-frame auto-fit. Two forms:
+#   (A) Orientation-only — robust across datasets/scales (RECOMMENDED):
+#       MANUAL_CAM = {"azimuth": .., "elevation": .., "roll": ..,
+#                     "distance": "auto", "focalpoint": "auto"}
+#   (B) Absolute pose — exact, only valid in the same coordinate frame/scale
+#       (i.e. picked from visual_world_frame_npy.py):
+#       MANUAL_CAM = {"position": [...], "focal_point": [...], "view_up": [...],
+#                     "view_angle": .., "clipping_range": [...]}
+# ---------------------------------------------------------------------------
+
+# MANUAL_CAM = {
+#     "azimuth": 32.568, "elevation": 35.480, "roll": -44.759,
+#     "distance": "auto", "focalpoint": "auto",
+# } # N1 dataset
+
+MANUAL_CAM = {
+    "azimuth": -35.791, "elevation": 123.257, "roll": 136.032,
+    "distance": "auto", "focalpoint": "auto",
+} # lerobot dataset
 
 def numerical_sort(value):
     numbers = re.compile(r"(\d+)")
@@ -23,7 +48,7 @@ def numerical_sort(value):
 if __name__ == "__main__":
     parse = ArgumentParser()
     from pathlib import Path
-    default_input_dir = str(Path(r'G:\vln_real_data\l3rocc_data\for_ref\InternData-N1_vis_exp_00\trajectory_000002\merge_npy_sequence_world'))
+    default_input_dir = str(Path('/path/to/merge_npy_sequence_world'))
     default_output_video = default_input_dir + ".mp4"
     # Path to 'npy_sequence_world' directory (Expected data shape: N x 7)
     parse.add_argument(
@@ -171,7 +196,30 @@ if __name__ == "__main__":
         # 5. Camera: auto-fit on the first frame, then lock the viewpoint so the
         # whole sequence is rendered from one stable angle (no hardcoded pose).
         if locked_cam is None:
-            mlab.view()
+            if MANUAL_CAM is not None and "azimuth" in MANUAL_CAM:
+                # (A) Orientation-only: apply the hand-picked angle, let distance
+                # and focal point auto-fit to this (world-frame) scene.
+                mlab.view(
+                    azimuth=MANUAL_CAM.get("azimuth"),
+                    elevation=MANUAL_CAM.get("elevation"),
+                    distance=MANUAL_CAM.get("distance", "auto"),
+                    focalpoint=MANUAL_CAM.get("focalpoint", "auto"),
+                    roll=MANUAL_CAM.get("roll"),
+                )
+            elif MANUAL_CAM is not None and "position" in MANUAL_CAM:
+                # (B) Absolute pose: reproduce the exact camera state.
+                cam = figure.scene.camera
+                cam.position = MANUAL_CAM["position"]
+                cam.focal_point = MANUAL_CAM["focal_point"]
+                cam.view_up = MANUAL_CAM["view_up"]
+                if "view_angle" in MANUAL_CAM:
+                    cam.view_angle = MANUAL_CAM["view_angle"]
+                if "clipping_range" in MANUAL_CAM:
+                    cam.clipping_range = MANUAL_CAM["clipping_range"]
+                cam.compute_view_plane_normal()
+            else:
+                mlab.view()  # automatic auto-fit (default behavior)
+
             figure.scene.render()
             cam = figure.scene.camera
             locked_cam = {
