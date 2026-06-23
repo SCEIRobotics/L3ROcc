@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 import pandas as pd
+import open3d as o3d
 
 from L3ROcc.base import DataGenerator
 from L3ROcc.utils import (
@@ -44,7 +45,7 @@ class InternNavDataGenerator(DataGenerator):
     The full data-processing pipeline is **GT-free**: GT-based helpers (``get_gt_poses`` /
     ``align_with_gt_scale`` / ``align_to_world``) are kept for offline diagnosis only. The saved
     ``camera_extrinsic_occ`` is a GT-free rigid coordinate-system change of the model poses
-    (see ``transform_camera_poses_convention``): N1 applies the C=diag(1,-1,-1) basis change,
+    (see ``_transform_camera_poses_convention``): N1 applies the C=diag(1,-1,-1) basis change,
     Lerobot leaves the poses unchanged.
     """
 
@@ -69,7 +70,7 @@ class InternNavDataGenerator(DataGenerator):
         """
         super().__init__(config_path, save_dir, model_dir, model_type=model_type)
 
-    def check_processing_status(self, input_path, overwrite=False):
+    def _check_processing_status(self, input_path, overwrite=False):
         """
         Check if the data needs to be processed.
         It verifies the existence of final target files, Parquet columns & lengths,
@@ -414,9 +415,21 @@ class InternNavDataGenerator(DataGenerator):
 
         except Exception as e:
             print(f"[Subclass Error] Failed to load GT poses: {e}")
-            return None
+            raise
 
-    def transform_camera_poses_convention(self, camera_pose, extrinsic_convention):
+    def _convention_C4(self, extrinsic_convention):
+        """Per-dataset camera-convention basis change M (4x4): OpenCV->OpenGL C=diag(1,-1,-1)
+        in the top-left for ``"opengl"`` (N1 render extrinsics), identity otherwise (Lerobot
+        opencv / None). Shared by ``_transform_camera_poses_convention`` (pose conjugation
+        ``aligned[i] = C4 @ P[i] @ C4``) and ``run_pipeline``'s world-fusion rigid M, so the
+        single convention->matrix mapping is not duplicated.
+        """
+        C4 = np.eye(4, dtype=np.float64)
+        if extrinsic_convention == "opengl":
+            C4[:3, :3] = self.R_opencv_to_opengl
+        return C4
+
+    def _transform_camera_poses_convention(self, camera_pose, extrinsic_convention):
         """GT-free rigid coordinate-system change of the Pi3X camera poses (no GT, no frame-0
         anchoring) — the saved ``camera_extrinsic_occ`` stays in the model world frame, only
         re-expressed under the per-dataset camera convention.
@@ -446,9 +459,7 @@ class InternNavDataGenerator(DataGenerator):
 
         P = np.asarray(camera_pose, dtype=np.float64)
 
-        C4 = np.eye(4, dtype=np.float64)
-        if extrinsic_convention == "opengl":
-            C4[:3, :3] = self.R_opencv_to_opengl
+        C4 = self._convention_C4(extrinsic_convention)
 
         # aligned[i] = C4 @ P[i] @ C4 (basis change; identity when C4 == I)
         aligned = np.einsum("ij,njk,kl->nil", C4, P, C4)
@@ -634,10 +645,9 @@ class InternNavDataGenerator(DataGenerator):
             # Z-axis vs absolute gravity offset).
             tilt_pcd_deg = float("nan")
             try:
-                import open3d as _o3d
-                _pcd_o3d = _o3d.geometry.PointCloud()
-                _pcd_o3d.points = _o3d.utility.Vector3dVector(pcd_aligned.astype(np.float64))
-                _plane, _inliers = _pcd_o3d.segment_plane(
+                _pcdo3d = o3d.geometry.PointCloud()
+                _pcdo3d.points = o3d.utility.Vector3dVector(pcd_aligned.astype(np.float64))
+                _plane, _inliers = _pcdo3d.segment_plane(
                     distance_threshold=0.05, ransac_n=3, num_iterations=300
                 )
                 n_ground = np.asarray(_plane[:3], dtype=np.float64)
@@ -689,11 +699,11 @@ class InternNavDataGenerator(DataGenerator):
                         # Re-fit ground for verification.
                         tilt_after = float("nan")
                         try:
-                            _pcd_o3d2 = _o3d.geometry.PointCloud()
-                            _pcd_o3d2.points = _o3d.utility.Vector3dVector(
+                            _pcdo3d2 = o3d.geometry.PointCloud()
+                            _pcdo3d2.points = o3d.utility.Vector3dVector(
                                 pcd_aligned.astype(np.float64)
                             )
-                            _pm2, _ = _pcd_o3d2.segment_plane(
+                            _pm2, _ = _pcdo3d2.segment_plane(
                                 distance_threshold=0.05, ransac_n=3, num_iterations=300
                             )
                             n2 = np.asarray(_pm2[:3], dtype=np.float64)
@@ -729,7 +739,7 @@ class InternNavDataGenerator(DataGenerator):
 
         except Exception as e:
             print(f"[Scale Error] Exception during alignment: {e}")
-            return pcd, 1.0
+            raise
 
     def _fold_gravity_into_tcam2base(self, pcd, T_cam2base):
         """Lerobot z-deskew stage ① (frame-0 gravity fold): fold the base-frame Z-tilt deskew
@@ -751,7 +761,7 @@ class InternNavDataGenerator(DataGenerator):
                 T_cam2base,
             )
             R_deskew, tilt_before = gravity_R_to_z(p_base0, cc_base0)
-        except Exception as e:
+        except ValueError as e:
             print(f"[gravity-base] lerobot Z-tilt deskew skipped: {e}")
             return T_cam2base
         T_eff = np.array(T_cam2base, dtype=np.float32)
@@ -830,7 +840,7 @@ class InternNavDataGenerator(DataGenerator):
             "meta_info_json", os.path.join(self.save_path, "meta", "info.json")
         )
 
-        def update_info_logic(meta):
+        def _update_info_logic(meta):
             feat_ext = {
                 "dtype": "float32",
                 "shape": [4, 4],
@@ -850,11 +860,11 @@ class InternNavDataGenerator(DataGenerator):
 
         if os.path.exists(json_path):
             print(f"Updating JSON Safely: {json_path}")
-            self._update_json_safely(json_path, update_info_logic)
+            self._update_json_safely(json_path, _update_info_logic)
         else:
             print(f"JSON path does not exist: {json_path}")
 
-    def save_transforms_parquet(self, paths, per_frame_T_cam2base, T_cam2base_raw):
+    def _save_transforms_parquet(self, paths, per_frame_T_cam2base, T_cam2base_raw):
         """Lerobot z-deskew only: append the per-frame deskew rotation as an ``R_deskew``
         column to ``data/chunk-000/episode_000000.parquet`` (already seeded with the base
         columns and augmented with the OCC camera columns by ``update_metadata``).
@@ -1030,9 +1040,9 @@ class InternNavDataGenerator(DataGenerator):
                 time.sleep(0.1)
             except Exception as e:
                 print(f"Error updating {file_path}: {e}")
-                break
+                raise
 
-    def save_world_fusion_sequence(self, final_occ, save_dir, world_transform=None):
+    def _save_world_fusion_sequence(self, final_occ, save_dir, world_transform=None):
         """Save per-frame world-fused ``(N, 7)`` npy for ``tools/visual/npy_to_world_video.py``.
 
         Reuses the data pipeline's already-computed canonical-ego OCC (``final_occ`` from
@@ -1212,7 +1222,7 @@ class InternNavDataGenerator(DataGenerator):
             None
         """
         # Check Status
-        if not self.check_processing_status(input_path, overwrite=overwrite):
+        if not self._check_processing_status(input_path, overwrite=overwrite):
             return
 
         # 3D Reconstruction
@@ -1268,7 +1278,7 @@ class InternNavDataGenerator(DataGenerator):
         # The saved poses stay in the model world frame, only re-expressed under the per-dataset
         # camera convention (N1=C basis change diag(1,-1,-1); Lerobot=unchanged). self.camera_pose
         # itself stays untouched because the OCC stage above (world->camera per frame) depends on it.
-        aligned_poses = self.transform_camera_poses_convention(
+        aligned_poses = self._transform_camera_poses_convention(
             self.camera_pose, extrinsic_convention
         )
         # Stash for save_global_data's diagnostic overlay. The saved extrinsic stays GT-free;
@@ -1293,7 +1303,7 @@ class InternNavDataGenerator(DataGenerator):
         # Lerobot z-deskew: persist the per-frame deskew rotation D_i to episode_000000.parquet.
         # After update_metadata so its "Parquet not found" path stays harmless.
         if z_deskew and extrinsic_convention == "opencv":
-            self.save_transforms_parquet(
+            self._save_transforms_parquet(
                 paths, self.occ_per_frame_T_cam2base, T_cam2base_raw
             )
 
@@ -1305,11 +1315,9 @@ class InternNavDataGenerator(DataGenerator):
         # in-memory OCC (arr_4d_occ) / pcd / poses — no second inference. Map the fusion into
         # the SAME GT-free convention-changed frame as camera_extrinsic_occ:
         #   M = C4   (C4=R_OPENCV_TO_OPENGL for "opengl" else I) — matching
-        #   transform_camera_poses_convention (aligned[i] = C4 @ P[i] @ C4, center = R_C @ center).
+        #   _transform_camera_poses_convention (aligned[i] = C4 @ P[i] @ C4, center = R_C @ center).
         if save_world_fusion:
-            world_M = np.eye(4, dtype=np.float64)
-            if extrinsic_convention == "opengl":
-                world_M[:3, :3] = self.R_opencv_to_opengl
-            self.save_world_fusion_sequence(
+            world_M = self._convention_C4(extrinsic_convention)
+            self._save_world_fusion_sequence(
                 arr_4d_occ, self.save_path, world_transform=world_M
             )

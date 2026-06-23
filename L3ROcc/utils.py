@@ -170,7 +170,7 @@ def ransac_pcd_registration(
     best_mask (np.ndarray): Boolean array marking inliers.
     """
 
-    def warp_3d(pts, R, t, s):
+    def _warp_3d(pts, R, t, s):
         """
         Applies transformation to 3D point cloud: rotation R, translation t, scaling s.
         """
@@ -202,7 +202,7 @@ def ransac_pcd_registration(
         )
 
         # 2. Apply transformation to all points
-        transformed_src = warp_3d(src_pts, R, t, s)
+        transformed_src = _warp_3d(src_pts, R, t, s)
 
         # 3. Compute reprojection errors
         errors = np.linalg.norm(transformed_src - dst_pts, axis=1)
@@ -775,8 +775,6 @@ def ground_tilt_deg(pcd_base):
     Sign-agnostic; NaN on too-few-points/failure. Read-only profiling, no OCC effect.
     """
     try:
-        import open3d as o3d
-
         pts = np.asarray(pcd_base, dtype=np.float64)
         if pts.shape[0] < 100:
             return float("nan")
@@ -802,8 +800,6 @@ def ground_R_to_z(pts, cam_centers, min_inlier_frac=0.10):
     (unlike ``gravity_R_to_z``), so safe to call once per frame.
     """
     try:
-        import open3d as o3d
-
         pts = np.asarray(pts, dtype=np.float64)
         if pts.shape[0] < 200:
             return None
@@ -914,8 +910,6 @@ def gravity_R_to_z(pcd, cam_centers):
     Returns:
         (R_grav (3, 3) f64, tilt_before_deg)
     """
-    import open3d as o3d
-
     pcd64 = np.asarray(pcd, dtype=np.float64)
     if pcd64.shape[0] < 100:
         raise ValueError(f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}")
@@ -979,8 +973,6 @@ def gravity_align_to_z(pcd, camera_pose, pivot):
          tilt_after_deg, ground_z) — ground_z is the world-frame z level of the
          ground after rotation.
     """
-    import open3d as o3d
-
     pcd64 = np.asarray(pcd, dtype=np.float64)
     cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
     R_grav, tilt_before = gravity_R_to_z(pcd64, cam_centers)
@@ -1117,10 +1109,7 @@ def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
         )
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
-            try:
-                sources.append(Image.open(img_path))
-            except Exception as e:
-                print(f"Could not load depth {filenames[i]}: {e}")
+            sources.append(Image.open(img_path))
     else:
         raise ValueError(f"Unsupported path. Must be a directory: {path}")
 
@@ -1152,14 +1141,11 @@ def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
     to_tensor_transform = transforms.ToTensor()
 
     for img_pil in sources:
-        try:
-            # Resize to the uniform target size
-            resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
-            # Convert to tensor
-            img_tensor = to_tensor_transform(resized_img)
-            tensor_list.append(img_tensor)
-        except Exception as e:
-            print(f"Error processing an image: {e}")
+        # Resize to the uniform target size
+        resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+        # Convert to tensor
+        img_tensor = to_tensor_transform(resized_img)
+        tensor_list.append(img_tensor)
 
     if not tensor_list:
         print("No images were successfully processed.")
@@ -1199,10 +1185,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         all_frames = len(filenames)
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
-            try:
-                sources.append(Image.open(img_path).convert("RGB"))
-            except Exception as e:
-                print(f"Could not load image {filenames[i]}: {e}")
+            sources.append(Image.open(img_path).convert("RGB"))
     elif path.lower().endswith(".mp4"):
         print(f"Loading frames from video: {path}")
         cap = cv2.VideoCapture(path)
@@ -1258,14 +1241,11 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
     to_tensor_transform = transforms.ToTensor()
 
     for img_pil in sources:
-        try:
-            # Resize to the uniform target size
-            resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
-            # Convert to tensor
-            img_tensor = to_tensor_transform(resized_img)
-            tensor_list.append(img_tensor)
-        except Exception as e:
-            print(f"Error processing an image: {e}")
+        # Resize to the uniform target size
+        resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+        # Convert to tensor
+        img_tensor = to_tensor_transform(resized_img)
+        tensor_list.append(img_tensor)
 
     if not tensor_list:
         print("No images were successfully processed.")
