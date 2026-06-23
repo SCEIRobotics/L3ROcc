@@ -769,6 +769,335 @@ def convert_pointcloud_camera_to_world(points_camera, T_cw):
     return points_world
 
 
+def ground_tilt_deg(pcd_base):
+    """Diagnostic: RANSAC ground-plane tilt (deg) vs +Z for a base-frame cloud.
+
+    Sign-agnostic; NaN on too-few-points/failure. Read-only profiling, no OCC effect.
+    """
+    try:
+        import open3d as o3d
+
+        pts = np.asarray(pcd_base, dtype=np.float64)
+        if pts.shape[0] < 100:
+            return float("nan")
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+        plane, _inliers = o3d_pcd.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        n = np.asarray(plane[:3], dtype=np.float64)
+        n /= max(np.linalg.norm(n), 1e-12)
+        return float(np.degrees(np.arccos(np.clip(abs(n[2]), -1.0, 1.0))))
+    except Exception as e:
+        print(f"[Tilt-diag] per-frame ground RANSAC failed: {e}")
+        return float("nan")
+
+
+def ground_R_to_z(pts, cam_centers, min_inlier_frac=0.10):
+    """Per-frame leveling helper: RANSAC the ground of a base-frame cloud and return the
+    Rodrigues rotation (ground normal -> +Z), normal oriented by "camera above ground".
+
+    Returns ``(R (3,3) f64, inlier_frac, tilt_before_deg)`` or ``None`` if unreliable
+    (too few points / inlier_frac < ``min_inlier_frac`` / failure). Quiet and non-raising
+    (unlike ``gravity_R_to_z``), so safe to call once per frame.
+    """
+    try:
+        import open3d as o3d
+
+        pts = np.asarray(pts, dtype=np.float64)
+        if pts.shape[0] < 200:
+            return None
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+        plane, inliers = o3d_pcd.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        a, b, c, d = plane
+        n = np.array([a, b, c], dtype=np.float64)
+        cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+        if np.mean(cc @ n + d) < 0:  # camera should sit above the ground
+            n = -n
+        n /= max(np.linalg.norm(n), 1e-12)
+        inlier_frac = len(inliers) / max(pts.shape[0], 1)
+        if inlier_frac < min_inlier_frac:
+            return None
+        tilt = float(np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0))))
+        target = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(n, target)
+        s_axis = float(np.linalg.norm(axis))
+        c_axis = float(np.dot(n, target))
+        if s_axis <= 1e-6:
+            return np.eye(3), inlier_frac, tilt
+        k = axis / s_axis
+        K = np.array(
+            [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
+            dtype=np.float64,
+        )
+        R = np.eye(3) + s_axis * K + (1.0 - c_axis) * (K @ K)
+        return R, inlier_frac, tilt
+    except Exception:
+        return None
+
+
+def compute_perframe_leveling(
+    pcd_world, camera_poses, T_cam2base, min_inlier_frac=0.10, max_pts=60000
+):
+    """Method A — per-frame ego ground leveling with robust fallback.
+
+    Per frame, RANSAC the ground in its base frame and build ``R_level`` (ground normal
+    -> +Z), applied on top of ``T_cam2base``'s rotation. Unreliable frames are filled by
+    SLERP between the nearest reliable frames (ends clamped) to stay temporally smooth.
+    Estimation uses a random subsample of the world cloud (orientation is density- and
+    scale-robust); the OCC loop still voxelizes the full cloud.
+
+    Returns ``(T, 3, 3)`` f64 rotations, or ``None`` if no frame has a reliable ground.
+    """
+    pw = np.asarray(pcd_world, dtype=np.float64)
+    if pw.shape[0] == 0:
+        return None
+    if pw.shape[0] > max_pts:
+        sel = np.random.default_rng(0).choice(pw.shape[0], max_pts, replace=False)
+        pw = pw[sel]
+
+    cps = np.asarray(camera_poses, dtype=np.float64)
+    cam_centers_world = cps[:, :3, 3]
+    Rb = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
+    n_frames = cps.shape[0]
+
+    R_level = np.repeat(np.eye(3)[None], n_frames, axis=0)
+    good = np.zeros(n_frames, dtype=bool)
+    tilts = []
+    for i in range(n_frames):
+        p_cam = convert_pointcloud_world_to_camera(pw, cps[i])
+        p_base = np.asarray(p_cam, dtype=np.float64) @ Rb.T
+        cc_cam = convert_pointcloud_world_to_camera(cam_centers_world, cps[i])
+        cc_base = np.asarray(cc_cam, dtype=np.float64) @ Rb.T
+        res = ground_R_to_z(p_base, cc_base, min_inlier_frac=min_inlier_frac)
+        if res is not None:
+            R_level[i], _frac, _tilt = res
+            good[i] = True
+            tilts.append(_tilt)
+
+    n_good = int(good.sum())
+    if n_good == 0:
+        print(
+            "[level] per-frame leveling: no frame had a reliable ground plane; "
+            "keeping the frame-0 fold only."
+        )
+        return None
+
+    ks = np.where(good)[0]
+    if ks.size == 1:
+        R_level[:] = R_level[ks[0]]  # single keyframe -> constant rotation
+    else:
+        slerp = Slerp(ks, Rotation.from_matrix(R_level[ks]))
+        q = np.clip(np.arange(n_frames), ks[0], ks[-1])
+        R_level = slerp(q).as_matrix()
+    print(
+        f"[level] per-frame leveling (Method A): {n_good}/{n_frames} frames had a "
+        f"reliable ground (mean pre-level tilt {np.mean(tilts):.2f} deg); "
+        f"{n_frames - n_good} filled by SLERP/clamp."
+    )
+    return R_level
+
+
+def gravity_R_to_z(pcd, cam_centers):
+    """Estimate the ground plane by RANSAC and return the Rodrigues rotation mapping its
+    normal to +Z, plus the pre-correction tilt (deg). The normal sign is disambiguated by
+    "camera above ground". Shared by ``gravity_align_to_z`` (world frame) and
+    ``InternNavDataGenerator._fold_gravity_into_tcam2base`` (base frame).
+
+    Args:
+        pcd : (N, 3) point cloud.
+        cam_centers : (T, 3) camera centers, used to disambiguate the normal sign.
+
+    Returns:
+        (R_grav (3, 3) f64, tilt_before_deg)
+    """
+    import open3d as o3d
+
+    pcd64 = np.asarray(pcd, dtype=np.float64)
+    if pcd64.shape[0] < 100:
+        raise ValueError(f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}")
+
+    o3d_pcd = o3d.geometry.PointCloud()
+    o3d_pcd.points = o3d.utility.Vector3dVector(pcd64)
+    plane, inliers = o3d_pcd.segment_plane(
+        distance_threshold=0.05, ransac_n=3, num_iterations=300
+    )
+    # Disambiguate the normal sign by "camera above ground": n[2]>0 is unreliable because
+    # +Z is the (near-horizontal) camera forward in the Pi3X/OpenCV frame-0 system.
+    a, b, c, d = plane
+    n_ground = np.array([a, b, c])
+    cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+    mean_signed = np.mean(cc @ n_ground + d)  # mean signed camera-to-plane distance
+    if mean_signed < 0:
+        n_ground = -n_ground
+    n_ground /= max(np.linalg.norm(n_ground), 1e-12)
+    tilt_before = float(np.degrees(np.arccos(np.clip(n_ground[2], -1.0, 1.0))))
+    inlier_frac = len(inliers) / max(pcd64.shape[0], 1)
+    print(
+        f"[gravity] ground plane normal={n_ground.tolist()} "
+        f"inlier_frac={inlier_frac:.3f} tilt vs +Z = {tilt_before:.2f} deg"
+    )
+    if inlier_frac < 0.05:
+        raise ValueError(
+            f"[gravity] ground RANSAC inlier_frac too low ({inlier_frac:.3f}); "
+            f"cannot estimate gravity reliably"
+        )
+
+    target = np.array([0.0, 0.0, 1.0])
+    axis = np.cross(n_ground, target)
+    s_axis = float(np.linalg.norm(axis))
+    c_axis = float(np.dot(n_ground, target))
+    if s_axis <= 1e-6:
+        return np.eye(3), tilt_before  # already aligned with +Z
+    k_unit = axis / s_axis
+    K_skew = np.array(
+        [[0.0, -k_unit[2], k_unit[1]],
+         [k_unit[2], 0.0, -k_unit[0]],
+         [-k_unit[1], k_unit[0], 0.0]],
+    )
+    R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+    return R_grav, tilt_before
+
+
+def gravity_align_to_z(pcd, camera_pose, pivot):
+    """Estimate gravity via ground RANSAC and rotate the point cloud and camera poses
+    about ``pivot`` so the ground normal maps to +Z.
+
+    NOTE: not used by the data-processing pipeline; kept for verification only
+    (called by ``align_reconstruction_to_world``).
+
+    Args:
+        pcd : (N, 3) point cloud (rotated).
+        camera_pose : (T, 4, 4) camera poses (rotated).
+        pivot : (3,) rotation center (usually the frame-0 camera position).
+
+    Returns:
+        (pcd_rot (N, 3) f32, camera_pose_rot (T, 4, 4) f32, tilt_before_deg,
+         tilt_after_deg, ground_z) — ground_z is the world-frame z level of the
+         ground after rotation.
+    """
+    import open3d as o3d
+
+    pcd64 = np.asarray(pcd, dtype=np.float64)
+    cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
+    R_grav, tilt_before = gravity_R_to_z(pcd64, cam_centers)
+    pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
+
+    cp = np.asarray(camera_pose, dtype=np.float64).copy()
+    pcd_rot = (R_grav @ (pcd64 - pivot).T).T + pivot
+    cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
+    cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
+
+    # Re-fit the ground after rotation to verify tilt and read the ground z level
+    # (constant across the now-horizontal plane).
+    o3d_pcd2 = o3d.geometry.PointCloud()
+    o3d_pcd2.points = o3d.utility.Vector3dVector(pcd_rot)
+    plane2, _ = o3d_pcd2.segment_plane(
+        distance_threshold=0.05, ransac_n=3, num_iterations=300
+    )
+    c2 = float(plane2[2])
+    if abs(c2) < 1e-6:
+        raise ValueError(
+            f"[gravity] post-correction ground plane not horizontal (c2={c2:.3e}); "
+            f"gravity alignment failed"
+        )
+    ground_z = float(-float(plane2[3]) / c2)  # z level of plane ax+by+cz+d=0 when horizontal
+    n2 = np.asarray(plane2[:3], dtype=np.float64)
+    n2 /= max(np.linalg.norm(n2), 1e-12)
+    if n2[2] < 0:
+        n2 = -n2
+    tilt_after = float(np.degrees(np.arccos(np.clip(n2[2], -1.0, 1.0))))
+    print(
+        f"[gravity] post-correction ground tilt vs +Z = {tilt_after:.2f} deg, "
+        f"ground_z = {ground_z:.3f}"
+    )
+    return (
+        pcd_rot.astype(np.float32),
+        cp.astype(np.float32),
+        tilt_before,
+        tilt_after,
+        ground_z,
+    )
+
+
+def align_reconstruction_to_world(pcd, camera_pose, metric_scale_correction):
+    """GT-free alignment of a Pi3X reconstruction to the real-world frame (z up,
+    frame-0 canonical origin/orientation). Pure transform extracted from
+    ``InternNavDataGenerator.align_to_world`` (instance I/O stays in the method).
+
+    NOTE: not used by the data-processing pipeline; kept for verification only.
+
+      - Scale: trust the Pi3X metric_head (experimentally validated), with the optional
+        config correction factor ``metric_scale_correction`` (default 1.0).
+      - Gravity (roll/pitch): ground RANSAC normal -> +Z (``gravity_align_to_z``). The
+        Pi3X world frame is anchored at the frame-0 camera (OpenCV), so the ground normal
+        alone recovers global gravity without GT.
+      - Origin/yaw: frame-0 canonical — origin is the ground point under the frame-0
+        camera (x,y = frame-0 camera, z = ground level), giving ground z=0, the camera at
+        positive height (~0.6), and a mostly-positive point cloud ("body on the ground");
+        a +Z rotation maps the frame-0 forward to +X. OCC is ego-frame and invariant to
+        global yaw/translation, so this step only fixes global visualization and the
+        saved poses.
+
+    Args:
+        pcd : (N, 3) reconstructed point cloud (world frame).
+        camera_pose : (T, 4, 4) camera poses (world frame). Not mutated.
+        metric_scale_correction : optional scale factor (default 1.0 trusts metric_head).
+
+    Returns:
+        (pcd_aligned (N, 3) f32, camera_pose_aligned (T, 4, 4) f32, scale)
+    """
+    pcd_np = np.asarray(pcd, dtype=np.float64)
+    cp = np.asarray(camera_pose, dtype=np.float64).copy()
+
+    # 1) Scale (optional config correction factor; default 1.0 = trust metric_head)
+    s = float(metric_scale_correction)
+    if not np.isfinite(s) or s <= 0:
+        raise ValueError(f"[align_to_world] invalid metric_scale_correction: {s}")
+    pcd_np = pcd_np * s
+    cp[:, :3, 3] = cp[:, :3, 3] * s
+
+    # 2) Gravity alignment (about frame 0)
+    pivot = cp[0, :3, 3].copy()
+    pcd_g, cp_g, tilt_b, tilt_a, ground_z = gravity_align_to_z(pcd_np, cp, pivot)
+    pcd_np = np.asarray(pcd_g, dtype=np.float64)
+    cp = np.asarray(cp_g, dtype=np.float64)
+
+    # 3) Yaw canonicalization: project frame-0 forward (OpenCV z axis in world) onto XY, rotate to +X
+    pivot = cp[0, :3, 3].copy()
+    fwd = cp[0, :3, 2].copy()
+    fwd[2] = 0.0
+    fwd_norm = float(np.linalg.norm(fwd))
+    if fwd_norm > 1e-6:
+        fwd /= fwd_norm
+        yaw = float(np.arctan2(fwd[1], fwd[0]))
+        c, sN = np.cos(-yaw), np.sin(-yaw)
+        Rz = np.array(
+            [[c, -sN, 0.0], [sN, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+        )
+        pcd_np = (Rz @ (pcd_np - pivot).T).T + pivot
+        cp[:, :3, 3] = (Rz @ (cp[:, :3, 3] - pivot).T).T + pivot
+        cp[:, :3, :3] = np.einsum("ij,tjk->tik", Rz, cp[:, :3, :3])
+
+    # 4) Origin: x,y from frame-0 camera, z from ground level -> ground z=0, camera at +height, mostly-positive pcd
+    origin = np.array([cp[0, 0, 3], cp[0, 1, 3], ground_z], dtype=np.float64)
+    pcd_np = pcd_np - origin
+    cp[:, :3, 3] = cp[:, :3, 3] - origin
+
+    pcd_aligned = pcd_np.astype(np.float32)
+    cp_aligned = cp.astype(np.float32)
+    cam0_h = float(cp[0, 2, 3])
+    print(
+        f"[align_to_world] GT-free: scale={s:.4f}, ground tilt "
+        f"{tilt_b:.2f}->{tilt_a:.2f} deg, origin->frame-0 foot on ground "
+        f"(ground z=0, cam0 height={cam0_h:.3f} m), yaw canonicalized."
+    )
+    return pcd_aligned, cp_aligned, s
+
+
 def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
     """
     Loads depths from a directory or video, resizes them to a uniform size,

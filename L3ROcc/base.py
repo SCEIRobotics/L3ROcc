@@ -15,9 +15,11 @@ import yaml
 from scipy import sparse
 
 from L3ROcc.utils import (
+    compute_perframe_leveling,
     convert_pointcloud_world_to_camera,
     create_mesh_from_map,
     estimate_intrinsics,
+    ground_tilt_deg,
     homogenize_points,
     interpolate_extrinsics,
     load_images_as_tensor,
@@ -843,42 +845,6 @@ class DataGenerator:
         if isinstance(occ_pcd_to_save, torch.Tensor):
             occ_pcd_to_save = occ_pcd_to_save.detach().cpu().numpy()
 
-        occ_frame_pcd = getattr(self, "occ_frame_pointcloud", None)
-        if occ_frame_pcd is not None:
-            if isinstance(occ_frame_pcd, torch.Tensor):
-                occ_frame_pcd = occ_frame_pcd.detach().cpu().numpy()
-            occ_frame_pcd = np.asarray(occ_frame_pcd, dtype=np.float32)
-            if occ_frame_pcd.ndim == 2 and occ_frame_pcd.shape[1] == 3:
-                occ_frame_pcd_path = paths.get(
-                    "occ_frame_pointcloud_ply",
-                    os.path.join(
-                        os.path.dirname(paths["global_occ"]),
-                        "occ_frame_pointcloud.ply",
-                    ),
-                )
-                occ_frame_colors = np.zeros_like(occ_frame_pcd, dtype=np.float32)
-                occ_frame_colors[:, 1] = 1.0  # Green point cloud in final OCC frame
-                write_ply(occ_frame_pcd, occ_frame_colors, occ_frame_pcd_path)
-                print(f"Saved OCC-frame Point Cloud to {occ_frame_pcd_path}")
-
-        occ_frame_traj = getattr(self, "occ_frame_camera_trajectory", None)
-        if occ_frame_traj is not None:
-            if isinstance(occ_frame_traj, torch.Tensor):
-                occ_frame_traj = occ_frame_traj.detach().cpu().numpy()
-            occ_frame_traj = np.asarray(occ_frame_traj, dtype=np.float32)
-            if occ_frame_traj.ndim == 2 and occ_frame_traj.shape[1] == 3:
-                traj_occ_ply_path = paths.get(
-                    "camera_trajectory_occ_frame_ply",
-                    os.path.join(
-                        os.path.dirname(paths["global_occ"]),
-                        "camera_trajectory_occ_frame.ply",
-                    ),
-                )
-                traj_occ_colors = np.zeros_like(occ_frame_traj, dtype=np.float32)
-                traj_occ_colors[:, 0] = 1.0  # Red trajectory points in final OCC frame
-                write_ply(occ_frame_traj, traj_occ_colors, traj_occ_ply_path)
-                print(f"Saved OCC-frame Camera Trajectory to {traj_occ_ply_path}")
-
         # Diagnostic trajectory ply (model vs GT, both in the dataset GT/N1 world frame).
         # ``aligned_camera_pose_world`` is the GT-free saved camera_extrinsic_occ (in the model
         # world frame); the camera-convention change alone does NOT place it in the N1 world, so
@@ -977,137 +943,6 @@ class DataGenerator:
             )
             print(f"Saved Mask in {time.time() - t_start:.2f}s")
 
-    def _ground_tilt_deg(self, pcd_base):
-        """Diagnostic: RANSAC ground-plane tilt (deg) vs +Z for a base-frame cloud.
-
-        Sign-agnostic; NaN on too-few-points/failure. Read-only profiling, no OCC effect.
-        """
-        try:
-            import open3d as o3d
-
-            pts = np.asarray(pcd_base, dtype=np.float64)
-            if pts.shape[0] < 100:
-                return float("nan")
-            o3d_pcd = o3d.geometry.PointCloud()
-            o3d_pcd.points = o3d.utility.Vector3dVector(pts)
-            plane, _inliers = o3d_pcd.segment_plane(
-                distance_threshold=0.05, ransac_n=3, num_iterations=300
-            )
-            n = np.asarray(plane[:3], dtype=np.float64)
-            n /= max(np.linalg.norm(n), 1e-12)
-            return float(np.degrees(np.arccos(np.clip(abs(n[2]), -1.0, 1.0))))
-        except Exception as e:
-            print(f"[Tilt-diag] per-frame ground RANSAC failed: {e}")
-            return float("nan")
-
-    def _ground_R_to_z(self, pts, cam_centers, min_inlier_frac=0.10):
-        """Per-frame leveling helper: RANSAC the ground of a base-frame cloud and return the
-        Rodrigues rotation (ground normal -> +Z), normal oriented by "camera above ground".
-
-        Returns ``(R (3,3) f64, inlier_frac, tilt_before_deg)`` or ``None`` if unreliable
-        (too few points / inlier_frac < ``min_inlier_frac`` / failure). Quiet and non-raising
-        (unlike the subclass ``_gravity_R_to_z``), so safe to call once per frame.
-        """
-        try:
-            import open3d as o3d
-
-            pts = np.asarray(pts, dtype=np.float64)
-            if pts.shape[0] < 200:
-                return None
-            o3d_pcd = o3d.geometry.PointCloud()
-            o3d_pcd.points = o3d.utility.Vector3dVector(pts)
-            plane, inliers = o3d_pcd.segment_plane(
-                distance_threshold=0.05, ransac_n=3, num_iterations=300
-            )
-            a, b, c, d = plane
-            n = np.array([a, b, c], dtype=np.float64)
-            cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
-            if np.mean(cc @ n + d) < 0:  # camera should sit above the ground
-                n = -n
-            n /= max(np.linalg.norm(n), 1e-12)
-            inlier_frac = len(inliers) / max(pts.shape[0], 1)
-            if inlier_frac < min_inlier_frac:
-                return None
-            tilt = float(np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0))))
-            target = np.array([0.0, 0.0, 1.0])
-            axis = np.cross(n, target)
-            s_axis = float(np.linalg.norm(axis))
-            c_axis = float(np.dot(n, target))
-            if s_axis <= 1e-6:
-                return np.eye(3), inlier_frac, tilt
-            k = axis / s_axis
-            K = np.array(
-                [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
-                dtype=np.float64,
-            )
-            R = np.eye(3) + s_axis * K + (1.0 - c_axis) * (K @ K)
-            return R, inlier_frac, tilt
-        except Exception:
-            return None
-
-    def _compute_perframe_leveling(
-        self, pcd_world, camera_poses, T_cam2base, min_inlier_frac=0.10, max_pts=60000
-    ):
-        """Method A — per-frame ego ground leveling with robust fallback.
-
-        Per frame, RANSAC the ground in its base frame and build ``R_level`` (ground normal
-        -> +Z), applied on top of ``T_cam2base``'s rotation. Unreliable frames are filled by
-        SLERP between the nearest reliable frames (ends clamped) to stay temporally smooth.
-        Estimation uses a random subsample of the world cloud (orientation is density- and
-        scale-robust); the OCC loop still voxelizes the full cloud.
-
-        Returns ``(T, 3, 3)`` f64 rotations, or ``None`` if no frame has a reliable ground.
-        """
-        pw = np.asarray(pcd_world, dtype=np.float64)
-        if pw.shape[0] == 0:
-            return None
-        if pw.shape[0] > max_pts:
-            sel = np.random.default_rng(0).choice(pw.shape[0], max_pts, replace=False)
-            pw = pw[sel]
-
-        cps = np.asarray(camera_poses, dtype=np.float64)
-        cam_centers_world = cps[:, :3, 3]
-        Rb = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
-        n_frames = cps.shape[0]
-
-        R_level = np.repeat(np.eye(3)[None], n_frames, axis=0)
-        good = np.zeros(n_frames, dtype=bool)
-        tilts = []
-        for i in range(n_frames):
-            p_cam = self.convert_pointcloud_world_to_camera(pw, cps[i])
-            p_base = np.asarray(p_cam, dtype=np.float64) @ Rb.T
-            cc_cam = self.convert_pointcloud_world_to_camera(cam_centers_world, cps[i])
-            cc_base = np.asarray(cc_cam, dtype=np.float64) @ Rb.T
-            res = self._ground_R_to_z(p_base, cc_base, min_inlier_frac=min_inlier_frac)
-            if res is not None:
-                R_level[i], _frac, _tilt = res
-                good[i] = True
-                tilts.append(_tilt)
-
-        n_good = int(good.sum())
-        if n_good == 0:
-            print(
-                "[level] per-frame leveling: no frame had a reliable ground plane; "
-                "keeping the frame-0 fold only."
-            )
-            return None
-
-        ks = np.where(good)[0]
-        if ks.size == 1:
-            R_level[:] = R_level[ks[0]]  # single keyframe -> constant rotation
-        else:
-            from scipy.spatial.transform import Rotation, Slerp
-
-            slerp = Slerp(ks, Rotation.from_matrix(R_level[ks]))
-            q = np.clip(np.arange(n_frames), ks[0], ks[-1])
-            R_level = slerp(q).as_matrix()
-        print(
-            f"[level] per-frame leveling (Method A): {n_good}/{n_frames} frames had a "
-            f"reliable ground (mean pre-level tilt {np.mean(tilts):.2f} deg); "
-            f"{n_frames - n_good} filled by SLERP/clamp."
-        )
-        return R_level
-
     def compute_sequence_data(
         self,
         pcd,
@@ -1175,8 +1010,6 @@ class DataGenerator:
         self.camera_pose = self.camera_pose.astype(np.float32)
         all_camera_poses = [[row for row in pose] for pose in self.camera_pose]
         camera_poses = torch.from_numpy(self.camera_pose).to(device).float()
-        self.occ_frame_pointcloud = None
-        self.occ_frame_camera_trajectory = None
         self.occ_per_frame_T_cam2base = None
         per_frame_T_list = []
 
@@ -1185,7 +1018,7 @@ class DataGenerator:
         per_frame_R_level = None
         if z_deskew and extrinsic_convention == "opencv" and T_cam2base is not None:
             _level_t0 = time.time()
-            per_frame_R_level = self._compute_perframe_leveling(
+            per_frame_R_level = compute_perframe_leveling(
                 pcd_points_world_np, self.camera_pose, T_cam2base
             )
             print(
@@ -1239,30 +1072,7 @@ class DataGenerator:
                     if isinstance(pcd_points_base, torch.Tensor)
                     else np.asarray(pcd_points_base)
                 )
-                diag_tilts[i] = self._ground_tilt_deg(pts_np)
-
-            if i == total_frames - 1:
-                if isinstance(pcd_points_base, torch.Tensor):
-                    self.occ_frame_pointcloud = pcd_points_base.detach().cpu().numpy()
-                else:
-                    self.occ_frame_pointcloud = np.asarray(pcd_points_base)
-                traj_points_world = camera_poses[:, :3, 3]
-                traj_points_cam = self.convert_pointcloud_world_to_camera(
-                    traj_points_world, current_pose
-                )
-                traj_points_cam *= scale
-                if T_cam2base_i is not None:
-                    traj_points_base = self.convert_pointcloud_camera_to_base(
-                        traj_points_cam, T_cam2base_i
-                    )
-                else:
-                    traj_points_base = traj_points_cam
-                if isinstance(traj_points_base, torch.Tensor):
-                    self.occ_frame_camera_trajectory = (
-                        traj_points_base.detach().cpu().numpy()
-                    )
-                else:
-                    self.occ_frame_camera_trajectory = np.asarray(traj_points_base)
+                diag_tilts[i] = ground_tilt_deg(pts_np)
 
             # Convert to occupancy (pcd is maintained at aligned scale)
             self.occ_pcd = self.pcd_to_occ(pcd_points_base)

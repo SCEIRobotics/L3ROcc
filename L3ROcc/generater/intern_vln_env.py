@@ -9,7 +9,12 @@ import numpy as np
 import pandas as pd
 
 from L3ROcc.base import DataGenerator
-from L3ROcc.utils import voxels_to_pcd
+from L3ROcc.utils import (
+    align_reconstruction_to_world,
+    gravity_R_to_z,
+    gravity_align_to_z,
+    voxels_to_pcd,
+)
 
 
 def _quat_wxyz_to_R(q):
@@ -726,66 +731,6 @@ class InternNavDataGenerator(DataGenerator):
             print(f"[Scale Error] Exception during alignment: {e}")
             return pcd, 1.0
 
-    def _gravity_R_to_z(self, pcd, cam_centers):
-        """Estimate the ground plane by RANSAC and return the Rodrigues rotation mapping its
-        normal to +Z, plus the pre-correction tilt (deg). The normal sign is disambiguated by
-        "camera above ground". Shared by ``_gravity_align_to_z`` (world frame) and
-        ``_fold_gravity_into_tcam2base`` (base frame).
-
-        Args:
-            pcd : (N, 3) point cloud.
-            cam_centers : (T, 3) camera centers, used to disambiguate the normal sign.
-
-        Returns:
-            (R_grav (3, 3) f64, tilt_before_deg)
-        """
-        import open3d as o3d
-
-        pcd64 = np.asarray(pcd, dtype=np.float64)
-        if pcd64.shape[0] < 100:
-            raise ValueError(f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}")
-
-        o3d_pcd = o3d.geometry.PointCloud()
-        o3d_pcd.points = o3d.utility.Vector3dVector(pcd64)
-        plane, inliers = o3d_pcd.segment_plane(
-            distance_threshold=0.05, ransac_n=3, num_iterations=300
-        )
-        # Disambiguate the normal sign by "camera above ground": n[2]>0 is unreliable because
-        # +Z is the (near-horizontal) camera forward in the Pi3X/OpenCV frame-0 system.
-        a, b, c, d = plane
-        n_ground = np.array([a, b, c])
-        cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
-        mean_signed = np.mean(cc @ n_ground + d)  # mean signed camera-to-plane distance
-        if mean_signed < 0:
-            n_ground = -n_ground
-        n_ground /= max(np.linalg.norm(n_ground), 1e-12)
-        tilt_before = float(np.degrees(np.arccos(np.clip(n_ground[2], -1.0, 1.0))))
-        inlier_frac = len(inliers) / max(pcd64.shape[0], 1)
-        print(
-            f"[gravity] ground plane normal={n_ground.tolist()} "
-            f"inlier_frac={inlier_frac:.3f} tilt vs +Z = {tilt_before:.2f} deg"
-        )
-        if inlier_frac < 0.05:
-            raise ValueError(
-                f"[gravity] ground RANSAC inlier_frac too low ({inlier_frac:.3f}); "
-                f"cannot estimate gravity reliably"
-            )
-
-        target = np.array([0.0, 0.0, 1.0])
-        axis = np.cross(n_ground, target)
-        s_axis = float(np.linalg.norm(axis))
-        c_axis = float(np.dot(n_ground, target))
-        if s_axis <= 1e-6:
-            return np.eye(3), tilt_before  # already aligned with +Z
-        k_unit = axis / s_axis
-        K_skew = np.array(
-            [[0.0, -k_unit[2], k_unit[1]],
-             [k_unit[2], 0.0, -k_unit[0]],
-             [-k_unit[1], k_unit[0], 0.0]],
-        )
-        R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
-        return R_grav, tilt_before
-
     def _fold_gravity_into_tcam2base(self, pcd, T_cam2base):
         """Lerobot z-deskew stage ① (frame-0 gravity fold): fold the base-frame Z-tilt deskew
         into the extrinsic rotation.
@@ -805,7 +750,7 @@ class InternNavDataGenerator(DataGenerator):
                 self.convert_pointcloud_world_to_camera(self.camera_pose[:, :3, 3], cam0),
                 T_cam2base,
             )
-            R_deskew, tilt_before = self._gravity_R_to_z(p_base0, cc_base0)
+            R_deskew, tilt_before = gravity_R_to_z(p_base0, cc_base0)
         except Exception as e:
             print(f"[gravity-base] lerobot Z-tilt deskew skipped: {e}")
             return T_cam2base
@@ -814,140 +759,24 @@ class InternNavDataGenerator(DataGenerator):
         print(f"[gravity-base] lerobot Z-tilt deskew folded into T_cam2base: tilt {tilt_before:.2f} deg -> ~0")
         return T_eff
 
-    def _gravity_align_to_z(self, pcd, camera_pose, pivot):
-        """Estimate gravity via ground RANSAC and rotate the point cloud and camera poses
-        about ``pivot`` so the ground normal maps to +Z.
-
-        NOTE: not used by the data-processing pipeline; kept for verification only
-        (called by ``align_to_world``).
-
-        Args:
-            pcd : (N, 3) point cloud (rotated).
-            camera_pose : (T, 4, 4) camera poses (rotated).
-            pivot : (3,) rotation center (usually the frame-0 camera position).
-
-        Returns:
-            (pcd_rot (N, 3) f32, camera_pose_rot (T, 4, 4) f32, tilt_before_deg,
-             tilt_after_deg, ground_z) — ground_z is the world-frame z level of the
-             ground after rotation.
-        """
-        import open3d as o3d
-
-        pcd64 = np.asarray(pcd, dtype=np.float64)
-        cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
-        R_grav, tilt_before = self._gravity_R_to_z(pcd64, cam_centers)
-        pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
-
-        cp = np.asarray(camera_pose, dtype=np.float64).copy()
-        pcd_rot = (R_grav @ (pcd64 - pivot).T).T + pivot
-        cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
-        cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
-
-        # Re-fit the ground after rotation to verify tilt and read the ground z level
-        # (constant across the now-horizontal plane).
-        o3d_pcd2 = o3d.geometry.PointCloud()
-        o3d_pcd2.points = o3d.utility.Vector3dVector(pcd_rot)
-        plane2, _ = o3d_pcd2.segment_plane(
-            distance_threshold=0.05, ransac_n=3, num_iterations=300
-        )
-        c2 = float(plane2[2])
-        if abs(c2) < 1e-6:
-            raise ValueError(
-                f"[gravity] post-correction ground plane not horizontal (c2={c2:.3e}); "
-                f"gravity alignment failed"
-            )
-        ground_z = float(-float(plane2[3]) / c2)  # z level of plane ax+by+cz+d=0 when horizontal
-        n2 = np.asarray(plane2[:3], dtype=np.float64)
-        n2 /= max(np.linalg.norm(n2), 1e-12)
-        if n2[2] < 0:
-            n2 = -n2
-        tilt_after = float(np.degrees(np.arccos(np.clip(n2[2], -1.0, 1.0))))
-        print(
-            f"[gravity] post-correction ground tilt vs +Z = {tilt_after:.2f} deg, "
-            f"ground_z = {ground_z:.3f}"
-        )
-        return (
-            pcd_rot.astype(np.float32),
-            cp.astype(np.float32),
-            tilt_before,
-            tilt_after,
-            ground_z,
-        )
-
     def align_to_world(self, pcd):
         """GT-free alignment of the Pi3X reconstruction to the real-world frame (z up,
-        frame-0 canonical origin/orientation).
+        frame-0 canonical origin/orientation). Thin wrapper around the pure transform
+        ``align_reconstruction_to_world`` (utils); this method only does the instance I/O.
 
         NOTE: not used by the data-processing pipeline; kept for verification only.
 
-        Unlike ``align_with_gt_scale``, this reads no GT odom:
-          - Scale: trust the Pi3X metric_head (experimentally validated), with the optional
-            config correction factor ``self.metric_scale_correction`` (default 1.0).
-          - Gravity (roll/pitch): ground RANSAC normal -> +Z (``_gravity_align_to_z``). The
-            Pi3X world frame is anchored at the frame-0 camera (OpenCV), so the ground normal
-            alone recovers global gravity without GT.
-          - Origin/yaw: frame-0 canonical — origin is the ground point under the frame-0
-            camera (x,y = frame-0 camera, z = ground level), giving ground z=0, the camera at
-            positive height (~0.6), and a mostly-positive point cloud ("body on the ground");
-            a +Z rotation maps the frame-0 forward to +X. OCC is ego-frame and invariant to
-            global yaw/translation, so this step only fixes global visualization and the
-            saved poses.
-
-        Updates self.pcd / self.camera_pose in place; returns (pcd_aligned, scale).
+        Reads ``self.metric_scale_correction``; updates ``self.pcd`` / ``self.camera_pose``
+        in place; returns ``(pcd_aligned, scale)``.
         """
         if self.camera_pose is None or len(self.camera_pose) == 0:
             raise ValueError("[align_to_world] camera_pose is empty")
 
-        pcd_np = np.asarray(pcd, dtype=np.float64)
-        cp = np.asarray(self.camera_pose, dtype=np.float64).copy()
-
-        # 1) Scale (optional config correction factor; default 1.0 = trust metric_head)
-        s = float(self.metric_scale_correction)
-        if not np.isfinite(s) or s <= 0:
-            raise ValueError(f"[align_to_world] invalid metric_scale_correction: {s}")
-        pcd_np = pcd_np * s
-        cp[:, :3, 3] = cp[:, :3, 3] * s
-
-        # 2) Gravity alignment (about frame 0)
-        pivot = cp[0, :3, 3].copy()
-        pcd_g, cp_g, tilt_b, tilt_a, ground_z = self._gravity_align_to_z(
-            pcd_np, cp, pivot
+        pcd_aligned, cp_aligned, s = align_reconstruction_to_world(
+            pcd, self.camera_pose, self.metric_scale_correction
         )
-        pcd_np = np.asarray(pcd_g, dtype=np.float64)
-        cp = np.asarray(cp_g, dtype=np.float64)
-
-        # 3) Yaw canonicalization: project frame-0 forward (OpenCV z axis in world) onto XY, rotate to +X
-        pivot = cp[0, :3, 3].copy()
-        fwd = cp[0, :3, 2].copy()
-        fwd[2] = 0.0
-        fwd_norm = float(np.linalg.norm(fwd))
-        if fwd_norm > 1e-6:
-            fwd /= fwd_norm
-            yaw = float(np.arctan2(fwd[1], fwd[0]))
-            c, sN = np.cos(-yaw), np.sin(-yaw)
-            Rz = np.array(
-                [[c, -sN, 0.0], [sN, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
-            )
-            pcd_np = (Rz @ (pcd_np - pivot).T).T + pivot
-            cp[:, :3, 3] = (Rz @ (cp[:, :3, 3] - pivot).T).T + pivot
-            cp[:, :3, :3] = np.einsum("ij,tjk->tik", Rz, cp[:, :3, :3])
-
-        # 4) Origin: x,y from frame-0 camera, z from ground level -> ground z=0, camera at +height, mostly-positive pcd
-        origin = np.array(
-            [cp[0, 0, 3], cp[0, 1, 3], ground_z], dtype=np.float64
-        )
-        pcd_np = pcd_np - origin
-        cp[:, :3, 3] = cp[:, :3, 3] - origin
-
-        pcd_aligned = pcd_np.astype(np.float32)
         self.pcd = pcd_aligned
-        self.camera_pose = cp.astype(np.float32)
-        cam0_h = float(cp[0, 2, 3])
-        print(
-            f"[align_to_world] GT-free: scale={s:.4f}, ground tilt "
-            f"{tilt_b:.2f}->{tilt_a:.2f} deg, origin->frame-0 foot on ground "
-            f"(ground z=0, cam0 height={cam0_h:.3f} m), yaw canonicalized."
-        )
+        self.camera_pose = cp_aligned
         return pcd_aligned, s
 
     def update_metadata(
