@@ -88,6 +88,24 @@ def run_dataset_pipeline(args):
     loader = InternNavSequenceLoader(dataset_root)
     print(f"Scan complete. Found {len(loader)} trajectories.")
 
+    total_trajectories = len(loader)
+    if args.num_shards < 1:
+        raise ValueError(f"--num_shards must be >= 1, got {args.num_shards}")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError(
+            f"--shard_index must be in [0, {args.num_shards - 1}], got {args.shard_index}"
+        )
+
+    shard_start = total_trajectories * args.shard_index // args.num_shards
+    shard_end = total_trajectories * (args.shard_index + 1) // args.num_shards
+    shard_count = shard_end - shard_start
+    print(
+        "Shard selection: "
+        f"index={args.shard_index}/{args.num_shards - 1}, "
+        f"global_range=[{shard_start}, {shard_end}), "
+        f"count={shard_count}"
+    )
+
     print(
         f"Initializing OCC Generator  model_type={args.model_type}  "
         f"use_depth={use_depth}  use_intrinsic={use_intrinsic}"
@@ -114,7 +132,7 @@ def run_dataset_pipeline(args):
         )
 
     # ================= 3. Start Processing Loop =================
-    for i in range(len(loader)):
+    for local_idx, i in enumerate(range(shard_start, shard_end), start=1):
         try:
             # A. Retrieve info from the loader (returns depth_path between video and intrinsic)
             video_path, depth_path, cam_intrinsics, cam_extrinsics, cam_convention = (
@@ -149,7 +167,10 @@ def run_dataset_pipeline(args):
             if not os.path.exists(current_save_dir):
                 os.makedirs(current_save_dir)
 
-            print(f"\n[{i + 1}/{len(loader)}] Processing: {relative_path}")
+            print(
+                f"\n[{local_idx}/{shard_count}] Processing: {relative_path} "
+                f"(global_index={i + 1}/{total_trajectories})"
+            )
             print(f"   Input:  {input_path_for_gen}")
             print(f"   Output: {current_save_dir}")
 
@@ -303,6 +324,19 @@ if __name__ == "__main__":
         "Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion in "
         "the dataset GT world frame. Only produced together with (re)generation, so use "
         "--overwrite true to regenerate fusion for already-processed trajectories. Default: false.",
+    )
+    parser.add_argument(
+        "--num_shards",
+        type=int,
+        default=1,
+        help="Split the dataset into N contiguous shards after scanning. Default: 1.",
+    )
+    parser.add_argument(
+        "--shard_index",
+        type=int,
+        default=0,
+        help="Zero-based shard index to process within --num_shards. "
+        "Example: --num_shards 3 --shard_index 1 processes the middle third.",
     )
 
     args = parser.parse_args()
