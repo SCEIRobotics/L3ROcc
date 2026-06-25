@@ -819,70 +819,51 @@ class DataGenerator:
 
         write_ply(pcd_to_save, pcd_color_to_save, paths["ply"])
 
-        # write traj ply
-        camera_pose_to_save = self.camera_pose
-        if isinstance(camera_pose_to_save, torch.Tensor):
-            camera_pose_to_save = camera_pose_to_save.detach().cpu().numpy()
-        camera_pose_to_save = np.asarray(camera_pose_to_save)
-        if camera_pose_to_save.ndim == 3 and camera_pose_to_save.shape[-2:] == (
-            4,
-            4,
-        ):
-            traj_points = camera_pose_to_save[:, :3, 3].astype(np.float32)
-            traj_colors = np.zeros_like(traj_points, dtype=np.float32)
-            traj_colors[:, 0] = 1.0  # Red camera trajectory points
-            trajectory_ply_path = paths.get(
-                "camera_trajectory_ply",
-                os.path.join(
-                    os.path.dirname(paths["ply"]), "camera_trajectory_orin.ply"
-                ),
-            )
-            write_ply(traj_points, traj_colors, trajectory_ply_path)
-            print(f"Saved Camera Trajectory to {trajectory_ply_path}")
+        # Write each camera trajectory to its own single-color ply (no overlay), so the four
+        # stages — model-raw / GT-free convention-only (C4@P@C4) / pipeline frame-0 anchored /
+        # GT — can be compared by loading the files together. All run_pipeline-set; each is
+        # skipped (gracefully) when its source is absent (e.g. no GT -> traj_gt.ply skipped).
+        traj_dir = os.path.dirname(paths["ply"])
+
+        def _save_traj_ply(poses, filename, rgb):
+            if poses is None:
+                return
+            if isinstance(poses, torch.Tensor):
+                poses = poses.detach().cpu().numpy()
+            poses = np.asarray(poses)
+            if poses.ndim != 3 or poses.shape[-2:] != (4, 4) or len(poses) == 0:
+                return
+            pts = poses[:, :3, 3].astype(np.float32)
+            colors = np.tile(np.asarray(rgb, dtype=np.float32), (len(pts), 1))
+            out_path = os.path.join(traj_dir, filename)
+            write_ply(pts, colors, out_path)
+            print(f"Saved Camera Trajectory to {out_path}")
+
+        # Model-inferred original camera trajectory (camera pose) — white.
+        _save_traj_ply(self.camera_pose, "infer_cam_traj_origin.ply", (1.0, 1.0, 1.0))
+        # GT-free trajectory, convention change C4 @ P @ C4 only — green.
+        _save_traj_ply(
+            getattr(self, "gtfree_camera_pose_world", None),
+            "infer_cam_traj_R.ply",
+            (0.0, 1.0, 0.0),
+        )
+        # Pipeline frame-0 anchored trajectory (== camera_extrinsic_occ) — blue.
+        _save_traj_ply(
+            getattr(self, "aligned_camera_pose_world", None),
+            "infer_cam_traj_aligned_0_frame.ply",
+            (0.0, 0.0, 1.0),
+        )
+        # GT trajectory (N1 action / Lerobot odom+hand-eye) — red.
+        _save_traj_ply(
+            getattr(self, "gt_camera_pose_world", None),
+            "traj_gt.ply",
+            (1.0, 0.0, 0.0),
+        )
 
         occ_pcd_to_save = self.occ_pcd
 
         if isinstance(occ_pcd_to_save, torch.Tensor):
             occ_pcd_to_save = occ_pcd_to_save.detach().cpu().numpy()
-
-        # Diagnostic trajectory ply (model vs GT, both in the dataset GT/N1 world frame).
-        # ``aligned_camera_pose_world`` is the GT-free saved camera_extrinsic_occ (in the model
-        # world frame); the camera-convention change alone does NOT place it in the N1 world, so
-        # for the overlay we rigidly anchor it onto the GT frame-0 (A0 @ inv(aligned[0]) @ aligned[i]).
-        # ``gt_camera_pose_world`` is the N1 action / Lerobot state-reconstructed GT trajectory.
-        # Both run_pipeline-set; skipped (no GT) when gt_camera_pose_world is None.
-        aligned_world = getattr(self, "aligned_camera_pose_world", None)
-        gt_world = getattr(self, "gt_camera_pose_world", None)
-        if aligned_world is not None and gt_world is not None:
-            aligned_world = np.asarray(aligned_world, dtype=np.float64)
-            gt_world = np.asarray(gt_world, dtype=np.float64)
-            if (
-                aligned_world.ndim == 3
-                and aligned_world.shape[-2:] == (4, 4)
-                and gt_world.ndim == 3
-                and gt_world.shape[-2:] == (4, 4)
-                and len(aligned_world) > 0
-                and len(gt_world) > 0
-            ):
-                # Rigidly place the GT-free model trajectory onto the GT frame-0 -> N1 world.
-                A0 = gt_world[0]
-                M = A0 @ np.linalg.inv(aligned_world[0])
-                placed = np.einsum("ij,njk->nik", M, aligned_world)
-                a_ctr = placed[:, :3, 3]
-                g_ctr = gt_world[:, :3, 3]
-                combo_pts = np.vstack([a_ctr, g_ctr]).astype(np.float32)
-                combo_colors = np.zeros_like(combo_pts, dtype=np.float32)
-                combo_colors[: len(a_ctr), 2] = 1.0  # Blue: model trajectory (frame-0 anchored)
-                combo_colors[len(a_ctr) :, 0] = 1.0  # Red: GT (N1 action) trajectory
-                combo_ply_path = os.path.join(
-                    os.path.dirname(paths["ply"]),
-                    "camera_trajectory_aligned_vs_gt.ply",
-                )
-                write_ply(combo_pts, combo_colors, combo_ply_path)
-                print(
-                    f"Saved model-vs-GT Camera Trajectory in N1 world (blue=model, red=GT) to "
-                    f"{combo_ply_path}"
-                )
 
         np.savez_compressed(
             paths["global_occ"], data=occ_pcd_to_save.astype(np.float32)
