@@ -88,6 +88,15 @@ def run_dataset_pipeline(args):
     loader = InternNavSequenceLoader(dataset_root)
     print(f"Scan complete. Found {len(loader)} trajectories.")
 
+    # Data-parallel sharding: this process only handles trajectory i with i % num_shards == shard_index.
+    if args.num_shards > 1:
+        mine = [i for i in range(len(loader)) if i % args.num_shards == args.shard_index]
+        preview = mine[:10] + (["..."] if len(mine) > 10 else [])
+        print(
+            f"[shard {args.shard_index}/{args.num_shards}] handling {len(mine)} of "
+            f"{len(loader)} trajectories: {preview}"
+        )
+
     print(
         f"Initializing OCC Generator  model_type={args.model_type}  "
         f"use_depth={use_depth}  use_intrinsic={use_intrinsic}"
@@ -115,6 +124,8 @@ def run_dataset_pipeline(args):
 
     # ================= 3. Start Processing Loop =================
     for i in range(len(loader)):
+        if args.num_shards > 1 and (i % args.num_shards) != args.shard_index:
+            continue
         try:
             # A. Retrieve info from the loader (returns depth_path between video and intrinsic)
             video_path, depth_path, cam_intrinsics, cam_extrinsics, cam_convention = (
@@ -305,7 +316,29 @@ if __name__ == "__main__":
         "--overwrite true to regenerate fusion for already-processed trajectories. Default: false.",
     )
 
+    # ---------- Multi-process data-parallel sharding (one process per GPU) ----------
+    parser.add_argument(
+        "--num_shards",
+        type=int,
+        default=1,
+        help="Total number of parallel processes / shards (e.g. number of GPUs). "
+        "Default 1 = a single process handles all trajectories (unchanged behavior).",
+    )
+    parser.add_argument(
+        "--shard_index",
+        type=int,
+        default=0,
+        help="This process handles trajectory i iff (i %% num_shards == shard_index). "
+        "All shards share one output_root; trajectories never collide because the loader's "
+        "GLOBAL index (and the name-based lerobot/N1 output paths) stay consistent across shards.",
+    )
+
     args = parser.parse_args()
+    if not (0 <= args.shard_index < args.num_shards):
+        parser.error(
+            f"--shard_index must be in [0, num_shards); got "
+            f"shard_index={args.shard_index}, num_shards={args.num_shards}"
+        )
     print("args: \n", args)
 
     faulthandler.enable()

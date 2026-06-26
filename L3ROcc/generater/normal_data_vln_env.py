@@ -21,8 +21,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                 ├── data/
                 │   └── chunk-000/
                 │       ├── episode_000000.parquet
-                │       ├── all_occ.npz
-                │       └── origin_pcd.ply
+                │       ├── last_frame_occ.npz
+                │       └── downsampled_pcd.ply
                 └── videos/
                     └── chunk-000/
                         ├── observation.occ.mask/
@@ -31,7 +31,7 @@ class SimpleVideoDataGenerator(DataGenerator):
                         │   └── occ_sequence.npz
                         └── observation.video.trajectory/
                             └── office.mp4
-                │       └── origin_pcd.ply
+                │       └── downsampled_pcd.ply
                 └── meta/
                     └── episode_stats.jsonl
                     └── episode.jsonl
@@ -77,8 +77,8 @@ class SimpleVideoDataGenerator(DataGenerator):
 
         # 3. File Paths
         paths = {
-            "ply": os.path.join(self.data_chunk_dir, "origin_pcd.ply"),
-            "global_occ": os.path.join(self.data_chunk_dir, "all_occ.npz"),
+            "ply": os.path.join(self.data_chunk_dir, "downsampled_pcd.ply"),
+            "global_occ": os.path.join(self.data_chunk_dir, "last_frame_occ.npz"),
             "parquet": os.path.join(self.data_chunk_dir, "episode_000000.parquet"),
             "occ_seq": os.path.join(self.occ_view_dir, "occ_sequence.npz"),
             "mask_seq": os.path.join(self.occ_mask_dir, "mask_sequence.npz"),

@@ -47,7 +47,8 @@ class InternNavDataGenerator(DataGenerator):
     ``_align_camera_poses_to_gt_world``): only the frame-0 GT pose ``A0`` pins origin/orientation,
     Pi3X's relative motion + scale carry later frames. N1 anchors to ``action`` (Schema A) with
     C=diag(1,-1,-1); Lerobot to odom+hand-eye (Schema B) with C=I. When GT is unavailable the
-    saved poses fall back to the GT-free convention change ``C4 @ P @ C4``.
+    saved poses fall back to frame-0 normalization ``C4 @ inv(P0) @ P @ C4`` (model frame-0 ->
+    identity, ego-canonical).
     """
 
     def __init__(
@@ -168,8 +169,8 @@ class InternNavDataGenerator(DataGenerator):
 
         Returns:
             dict: A dictionary containing output file paths. Keys include:
-                - 'ply': Path to the original point cloud (.ply).
-                - 'global_occ': Path to the global occupancy file (.npz).
+                - 'ply': Path to the downsampled reconstructed point cloud (.ply).
+                - 'global_occ': Path to the last-frame occupancy point cloud (.npz).
                 - 'parquet': Path to the episode metadata (.parquet).
                 - 'occ_seq': Path to the occupancy sequence (.npz).
                 - 'mask_seq': Path to the mask sequence (.npz).
@@ -190,8 +191,8 @@ class InternNavDataGenerator(DataGenerator):
 
         # 2. Define file paths
         paths = {
-            "ply": os.path.join(data_chunk_dir, "origin_pcd.ply"),
-            "global_occ": os.path.join(data_chunk_dir, "all_occ.npz"),
+            "ply": os.path.join(data_chunk_dir, "downsampled_pcd.ply"),
+            "global_occ": os.path.join(data_chunk_dir, "last_frame_occ.npz"),
             "parquet": os.path.join(data_chunk_dir, "episode_000000.parquet"),
             "occ_seq": os.path.join(occ_view_dir, "occ_sequence.npz"),
             "mask_seq": os.path.join(occ_mask_dir, "mask_sequence.npz"),
@@ -449,9 +450,11 @@ class InternNavDataGenerator(DataGenerator):
         N1 (``"opengl"``): ``C4=diag(1,-1,-1)``, ``A0`` from ``action`` (Schema A).
         Lerobot (``"opencv"``): ``C4=I``, ``A0`` reconstructed from odom+hand-eye (Schema B).
 
-        **GT-free fallback**: when ``gt_poses`` is None/empty (no hand-eye / no GT), there is no
-        ``A0`` to anchor to, so fall back to the pure convention change ``aligned[i] = C4 @ P[i] @ C4``
-        (the saved poses then stay in the model world frame, not the GT world frame).
+        **GT-free fallback**: when ``gt_poses`` is None/empty (no hand-eye / no GT), anchor to the
+        model's OWN frame-0 instead (set ``A0 = I`` -> ``M_left = C4 @ inv(P0)``), so
+        ``aligned[0] == I`` (ego-canonical: frame-0 camera at origin/identity, trajectory relative
+        to it). The saved poses then live in the frame-0 camera frame (camera-tilted, NOT
+        gravity-aligned, and NOT the dataset's real world placement — that needs GT).
 
         Args:
             camera_pose (np.ndarray): (N, 4, 4) model camera poses (cam->world, scaled).
@@ -462,9 +465,9 @@ class InternNavDataGenerator(DataGenerator):
         Returns:
             tuple ``(aligned, M_left)``:
                 - aligned (np.ndarray or None): (N, 4, 4) poses in the GT world frame (or the
-                  convention-changed model world frame on fallback); None when ``camera_pose`` empty.
+                  frame-0 camera frame on fallback, aligned[0]==I); None when ``camera_pose`` empty.
                 - M_left (np.ndarray or None): 4x4 model-world -> GT-world rigid for world-fusion
-                  reuse; ``C4`` on fallback.
+                  reuse; ``C4 @ inv(P0)`` on fallback.
         """
         if camera_pose is None or len(camera_pose) == 0:
             return None, None
@@ -474,9 +477,11 @@ class InternNavDataGenerator(DataGenerator):
 
         if gt_poses is not None and len(gt_poses) > 0:
             A0 = np.asarray(gt_poses[0], dtype=np.float64)
-            M_left = A0 @ C4 @ np.linalg.inv(P[0])  # model-world -> GT-world (frame-0 anchored)
+            M_left = A0 @ C4 @ np.linalg.inv(P[0])  # model-world -> GT-world (frame-0 anchored to GT)
         else:
-            M_left = C4  # GT-free fallback: pure convention change C4 @ P @ C4
+            # GT-free fallback: frame-0 normalization = the general M_left with A0 = I.
+            # aligned[0] = C4 @ inv(P0) @ P0 @ C4 = C4 @ C4 = I (ego-canonical: frame-0 cam = origin).
+            M_left = C4 @ np.linalg.inv(P[0])
 
         # aligned[i] = M_left @ P[i] @ C4
         aligned = np.einsum("ij,njk,kl->nil", M_left, P, C4)
@@ -1297,18 +1302,23 @@ class InternNavDataGenerator(DataGenerator):
         # above (world->camera per frame) depends on it. ``world_M`` is the model-world->GT-world
         # rigid, reused for world-fusion so it lands in the SAME frame as camera_extrinsic_occ.
         # GT (N1 action / Lerobot odom+hand-eye) is read once here; when unavailable the call
-        # falls back to the GT-free convention change C4 @ P @ C4.
+        # falls back to frame-0 normalization (model frame-0 -> identity, C4 @ inv(P0) @ P @ C4).
         self.gt_camera_pose_world = self.get_gt_poses(input_path)
         aligned_poses, world_M = self._align_camera_poses_to_gt_world(
             self.camera_pose, extrinsic_convention, self.gt_camera_pose_world
         )
         self.aligned_camera_pose_world = aligned_poses  # stashed for save_global_data overlay
-        # GT-free trajectory (pure convention change C4 @ P @ C4) for the infer_cam_traj_R.ply
-        # overlay; reuses the same method's gt_poses=None branch so the formula is not duplicated.
-        gtfree_poses, _ = self._align_camera_poses_to_gt_world(
-            self.camera_pose, extrinsic_convention, None  # None -> GT-free C4 @ P @ C4
-        )
-        self.gtfree_camera_pose_world = gtfree_poses
+        # GT-free convention-ONLY trajectory (C4 @ P @ C4, un-anchored) for the infer_cam_traj_R.ply
+        # diagnostic — the pure axis-convention change that still sits in the model world frame.
+        # Computed inline (NOT via the method's no-GT branch, which is now frame-0 normalized).
+        if self.camera_pose is not None and len(self.camera_pose) > 0:
+            _C4 = self._convention_C4(extrinsic_convention)
+            _P = np.asarray(self.camera_pose, dtype=np.float64)
+            self.gtfree_camera_pose_world = np.einsum(
+                "ij,njk,kl->nil", _C4, _P, _C4
+            ).astype(np.float32)
+        else:
+            self.gtfree_camera_pose_world = None
         _anchored = self.gt_camera_pose_world is not None and len(self.gt_camera_pose_world) > 0
         if aligned_poses is not None:
             all_camera_poses = [[row for row in pose] for pose in aligned_poses]
@@ -1317,7 +1327,7 @@ class InternNavDataGenerator(DataGenerator):
                 + (
                     "frame-0 anchored to GT world."
                     if _anchored
-                    else "GT-free fallback (no GT; convention change only)."
+                    else "GT-free fallback (no GT; frame-0 normalized, aligned[0]=I)."
                 )
             )
         else:
