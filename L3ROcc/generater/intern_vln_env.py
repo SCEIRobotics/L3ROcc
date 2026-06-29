@@ -5,8 +5,6 @@ import os
 import shutil
 import time
 
-import av
-import cv2
 import numpy as np
 import pandas as pd
 import open3d as o3d
@@ -1199,69 +1197,47 @@ class InternNavDataGenerator(DataGenerator):
         print(f"[world-fusion] saved {total_frames} frames -> {out_dir}")
 
     def _export_lerobot_source_media(self, input_path, depth_video_path):
-        """Lerobot (opencv) only: faithfully export source media into the output trajectory.
+        """Lerobot (opencv) only: copy the source RGB/depth VIDEOS into the output trajectory.
 
         Writes, under ``<save_path>/videos/chunk-000/``:
-          - ``observation.video.trajectory/episode_000000.mp4`` — verbatim copy of the source
-            RGB mp4 (fixed name).
-          - ``observation.images.rgb/<i>.jpg`` — every RGB frame (24-bit, native resolution).
-          - ``observation.images.depth/<i>.png`` — every depth frame (16-bit, native
-            resolution), only when ``depth_video_path`` is a 16-bit video.
+          - ``observation.video.rgb/episode_000000.mp4`` — verbatim copy of the source RGB mp4.
+          - ``observation.video.depth/episode_000000<ext>`` — verbatim copy of the source depth
+            video (native ext, typically ``.mkv``), only when ``depth_video_path`` exists.
 
         ``depth_video_path`` is the loader-resolved depth video for THIS trajectory (independent
-        of ``--use_depth`` / model conditioning), so depth is exported whenever it exists.
-
-        No interval sampling / no resize: the frame count intentionally does NOT match the OCC
-        sequence. Mirrors the source-reading conventions in ``L3ROcc.utils.load_images_as_tensor``
-        (cv2.VideoCapture for RGB, PyAV gray16le for depth).
+        of ``--use_depth`` / model conditioning), so depth is copied whenever it exists. No
+        frame extraction / no resize — the source videos are copied byte-for-byte.
         """
         video_chunk_dir = os.path.join(self.save_path, "videos", "chunk-000")
-        rgb_dir = os.path.join(video_chunk_dir, "observation.images.rgb")
-        depth_dir = os.path.join(video_chunk_dir, "observation.images.depth")
-        traj_video_dir = os.path.join(video_chunk_dir, "observation.video.trajectory")
-        for d in (rgb_dir, depth_dir, traj_video_dir):
-            os.makedirs(d, exist_ok=True)
 
-        # 1. Copy the source RGB mp4 verbatim (fixed output name).
-        shutil.copy2(input_path, os.path.join(traj_video_dir, "episode_000000.mp4"))
-        print(f"   [export] copied RGB trajectory video -> {traj_video_dir}/episode_000000.mp4")
+        # Clean up legacy products from older runs (per-frame dirs / trajectory copy) so a
+        # re-export yields only the new video-only structure.
+        for legacy in (
+            "observation.images.rgb",
+            "observation.images.depth",
+            "observation.video.trajectory",
+        ):
+            stale = os.path.join(video_chunk_dir, legacy)
+            if os.path.isdir(stale):
+                shutil.rmtree(stale, ignore_errors=True)
 
-        # 2. RGB frames: every frame, BGR straight to disk (cv2 imwrite expects BGR), native res.
-        cap = cv2.VideoCapture(input_path)
-        if not cap.isOpened():
-            raise IOError(f"[export] cannot open source RGB video: {input_path}")
-        n_rgb = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            cv2.imwrite(os.path.join(rgb_dir, f"{n_rgb}.jpg"), frame)
-            n_rgb += 1
-        cap.release()
-        print(f"   [export] wrote {n_rgb} RGB frames -> {rgb_dir}/<i>.jpg")
+        # RGB: copy the source mp4.
+        rgb_dir = os.path.join(video_chunk_dir, "observation.video.rgb")
+        os.makedirs(rgb_dir, exist_ok=True)
+        rgb_out = os.path.join(rgb_dir, "episode_000000.mp4")
+        shutil.copy2(input_path, rgb_out)
+        print(f"   [export] copied RGB video -> {rgb_out}")
 
-        # 3. Depth frames: every frame, raw uint16 to 16-bit PNG, native res. Optional.
-        if not depth_video_path or not os.path.isfile(depth_video_path):
-            print("   [export] no depth video for this trajectory; skipping depth frame export.")
-            return
-
-        container = av.open(str(depth_video_path))
-        video_stream = container.streams.video[0]
-        pix_fmt = (video_stream.codec_context.pix_fmt or "").lower()
-        # gray16le / *16le 等含 "16"; 8-bit (yuv420p / gray / yuvj420p) 不含 -> 拒绝伪深度。
-        if not (("16" in pix_fmt) or ("gray16" in pix_fmt)):
-            container.close()
-            raise ValueError(
-                f"[export] depth video pix_fmt={pix_fmt!r} is not 16-bit; refusing to export "
-                f"fake 16-bit depth from {depth_video_path}. Provide a 16-bit (gray16le) depth video."
-            )
-        n_depth = 0
-        for av_frame in container.decode(video_stream):
-            d_map = av_frame.to_ndarray(format="gray16le")  # uint16, native resolution
-            cv2.imwrite(os.path.join(depth_dir, f"{n_depth}.png"), d_map)
-            n_depth += 1
-        container.close()
-        print(f"   [export] wrote {n_depth} depth frames -> {depth_dir}/<i>.png")
+        # Depth: copy the source video (keep native ext), only when present.
+        if depth_video_path and os.path.isfile(depth_video_path):
+            depth_dir = os.path.join(video_chunk_dir, "observation.video.depth")
+            os.makedirs(depth_dir, exist_ok=True)
+            ext = os.path.splitext(depth_video_path)[1] or ".mkv"
+            depth_out = os.path.join(depth_dir, f"episode_000000{ext}")
+            shutil.copy2(depth_video_path, depth_out)
+            print(f"   [export] copied depth video -> {depth_out}")
+        else:
+            print("   [export] no depth video for this trajectory; skipping depth video copy.")
 
     def run_pipeline(
         self,
@@ -1308,13 +1284,11 @@ class InternNavDataGenerator(DataGenerator):
                 to ``merge_npy_sequence_world/`` for ``tools/visual/npy_to_world_video.py``.
                 Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion
                 in the dataset GT world frame. Default False.
-            export_frames (bool, optional): Lerobot (opencv) only — also export the source RGB
-                mp4 frame-by-frame to ``videos/chunk-000/observation.images.rgb/<i>.jpg`` (24-bit,
-                native resolution), the source depth video frame-by-frame to
-                ``observation.images.depth/<i>.png`` (16-bit, native resolution), and copy the
-                source RGB mp4 verbatim to ``observation.video.trajectory/episode_000000.mp4``.
-                No interval sampling / no resize, so the frame count does NOT match the OCC
-                sequence (by design). N1 (opengl) is unaffected. Default False.
+            export_frames (bool, optional): Lerobot (opencv) only — also copy the source videos
+                verbatim into ``videos/chunk-000/``: the RGB mp4 -> ``observation.video.rgb/
+                episode_000000.mp4`` and the depth video -> ``observation.video.depth/
+                episode_000000<ext>`` (when present). No frame extraction. N1 (opengl) is
+                unaffected. Default False.
             export_depth_path (str, optional): Loader-resolved depth video for THIS trajectory,
                 used for the depth-frame export above. Independent of ``condit_depth_path`` /
                 ``--use_depth`` so depth is exported whenever it exists. Defaults to None.

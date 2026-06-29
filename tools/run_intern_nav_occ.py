@@ -329,9 +329,9 @@ if __name__ == "__main__":
         type=_parse_bool,
         default=False,
         metavar="true|false",
-        help="Lerobot(opencv) only: 额外把源 rgb mp4 逐帧导出为 observation.images.rgb/<i>.jpg、"
-        "源 depth mkv 逐帧导出为 observation.images.depth/<i>.png(16bit)，并把源 rgb mp4 原样"
-        "拷到 observation.video.trajectory/episode_000000.mp4。原分辨率、每一帧、不做采样。"
+        help="Lerobot(opencv) only: 额外把源视频原样复制到输出—rgb mp4 -> "
+        "observation.video.rgb/episode_000000.mp4、depth 视频 -> observation.video.depth/"
+        "episode_000000<ext>(存在才拷)。不再逐帧抽图、无 observation.video.trajectory。"
         "仅在(重)生成时产出，已处理的轨迹需配合 --overwrite true。N1 无效。默认 false。",
     )
 

@@ -324,10 +324,11 @@ class DataGenerator:
         pcd_num = pcd.shape[0]
         frame_num = imgs.shape[0]
 
-        # Dynamic voxel size calculation, with safeguards against extreme values
-        voxel_size = loc_vol / max(pcd_num, 1) * frame_num * self.voxel_size_scale
-        # 限制 voxel_size 上限，防止异常大的 volume 产生过大的网格导致点云剧烈坍缩
-        voxel_size = np.clip(voxel_size, 0.01, 0.2)
+        # 使密度估计与采样帧数解耦
+        vol_per_point = loc_vol / max(pcd_num, 1) * frame_num  # m^3
+        voxel_size = vol_per_point ** (1.0 / 3.0) * self.voxel_size_scale  # -> m
+        # clip仅作极值安全
+        voxel_size = float(np.clip(voxel_size, 0.01, 0.2))
 
         # Voxel downsampling
         pcd_ocd = pcd_ocd.voxel_down_sample(voxel_size=voxel_size)
