@@ -43,11 +43,16 @@ class InternNavDataGenerator(DataGenerator):
     This class handles the pipeline of 3D reconstruction, metric-scale handling, optional
     Lerobot z-axis deskew, occupancy generation, and safe metadata updates using file locking.
     The OCC data chain is GT-free (ego/base frame, invariant to the global world frame). The saved
-    ``camera_extrinsic_occ`` is **frame-0 anchored into the dataset GT world** (Method A, see
-    ``_align_camera_poses_to_gt_world``): only the frame-0 GT pose ``A0`` pins origin/orientation,
-    Pi3X's relative motion + scale carry later frames. N1 anchors to ``action`` (Schema A) with
-    C=diag(1,-1,-1); Lerobot to odom+hand-eye (Schema B) with C=I. When GT is unavailable the
-    saved poses fall back to frame-0 normalization ``C4 @ inv(P0) @ P @ C4`` (model frame-0 ->
+    ``camera_extrinsic_occ`` anchoring depends on the camera convention (see
+    ``_align_camera_poses_to_gt_world``):
+      - N1 (opengl): **frame-0 anchored into the dataset GT world** (Method A) — the frame-0 GT pose
+        ``A0`` (from ``action``, Schema A) pins origin/orientation, C=diag(1,-1,-1); Pi3X's relative
+        motion + scale carry later frames. (verified correct.)
+      - Lerobot (opencv): **frame-0 CAMERA anchored** (``A0=I`` -> ``inv(P0) @ P[i]``, OpenCV axes,
+        C=I, ``aligned[0]==I``). The odom+hand-eye GT (Schema B) is reconstructed for diagnostics
+        only — anchoring opencv into the Z-up odom world made the downstream read the camera Z
+        reversed, so the saved extrinsic stays in the robot-camera frame.
+    When GT is unavailable (or opencv) the saved poses use frame-0 normalization (model frame-0 ->
     identity, ego-canonical).
     """
 
@@ -447,11 +452,17 @@ class InternNavDataGenerator(DataGenerator):
         is preserved); only frame 0 is pinned (``aligned[0] == A0``). This is the same transform
         the diagnostic ``camera_trajectory_aligned_vs_gt.ply`` uses (validated ~1.5cm residual).
 
-        N1 (``"opengl"``): ``C4=diag(1,-1,-1)``, ``A0`` from ``action`` (Schema A).
-        Lerobot (``"opencv"``): ``C4=I``, ``A0`` reconstructed from odom+hand-eye (Schema B).
+        N1 (``"opengl"``): ``C4=diag(1,-1,-1)``, ``A0`` from ``action`` (Schema A) — anchored into
+        the dataset GT world (verified correct). Callers pass the GT poses through for this path.
 
-        **GT-free fallback**: when ``gt_poses`` is None/empty (no hand-eye / no GT), anchor to the
-        model's OWN frame-0 instead (set ``A0 = I`` -> ``M_left = C4 @ inv(P0)``), so
+        Lerobot (``"opencv"``): ``C4=I``. The caller (``run_pipeline``) passes ``gt_poses=None`` on
+        purpose, so the saved extrinsic anchors to the frame-0 CAMERA (``A0=I`` -> ``inv(P0) @ P[i]``,
+        OpenCV axes, ``aligned[0]==I``), NOT the odom+hand-eye GT world. (Anchoring opencv into the
+        Z-up odom world via A0 made the downstream read the camera Z reversed.) The odom+hand-eye GT
+        is still reconstructed (Schema B) for diagnostics only.
+
+        **GT-free fallback**: when ``gt_poses`` is None/empty (no hand-eye / no GT, or opencv as
+        above), anchor to the model's OWN frame-0 instead (set ``A0 = I`` -> ``M_left = C4 @ inv(P0)``), so
         ``aligned[0] == I`` (ego-canonical: frame-0 camera at origin/identity, trajectory relative
         to it). The saved poses then live in the frame-0 camera frame (camera-tilted, NOT
         gravity-aligned, and NOT the dataset's real world placement — that needs GT).
@@ -1251,7 +1262,7 @@ class InternNavDataGenerator(DataGenerator):
         extrinsic_convention=None,
         z_deskew=False,
         save_world_fusion=False,
-        export_frames=False,
+        export_source_video=False,
         export_depth_path=None,
     ):
         """
@@ -1284,13 +1295,13 @@ class InternNavDataGenerator(DataGenerator):
                 to ``merge_npy_sequence_world/`` for ``tools/visual/npy_to_world_video.py``.
                 Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion
                 in the dataset GT world frame. Default False.
-            export_frames (bool, optional): Lerobot (opencv) only — also copy the source videos
-                verbatim into ``videos/chunk-000/``: the RGB mp4 -> ``observation.video.rgb/
+            export_source_video (bool, optional): Lerobot (opencv) only — also copy the source
+                videos verbatim into ``videos/chunk-000/``: the RGB mp4 -> ``observation.video.rgb/
                 episode_000000.mp4`` and the depth video -> ``observation.video.depth/
                 episode_000000<ext>`` (when present). No frame extraction. N1 (opengl) is
                 unaffected. Default False.
             export_depth_path (str, optional): Loader-resolved depth video for THIS trajectory,
-                used for the depth-frame export above. Independent of ``condit_depth_path`` /
+                used for the depth video copy above. Independent of ``condit_depth_path`` /
                 ``--use_depth`` so depth is exported whenever it exists. Defaults to None.
 
         Returns:
@@ -1325,10 +1336,10 @@ class InternNavDataGenerator(DataGenerator):
 
         paths = self.get_io_paths(input_path)
 
-        # Lerobot only: faithfully export the source RGB/depth frames + the RGB trajectory mp4
-        # so each output trajectory is self-contained. Like save_world_fusion, this only runs
-        # together with (re)generation, so use --overwrite true to re-export a processed traj.
-        if export_frames and extrinsic_convention == "opencv":
+        # Lerobot only: copy the source RGB/depth videos verbatim (no frame extraction, no
+        # trajectory mp4) so each output trajectory is self-contained. Like save_world_fusion,
+        # this only runs together with (re)generation, so use --overwrite true to re-copy.
+        if export_source_video and extrinsic_convention == "opencv":
             self._export_lerobot_source_media(input_path, export_depth_path)
 
         # Output is a separate dir: seed the source meta/ + base parquet so the in-place
@@ -1355,16 +1366,23 @@ class InternNavDataGenerator(DataGenerator):
         print("Saving 4D Sequence Arrays...")
         self.save_sequence_data(paths, arr_4d_occ, arr_4d_mask)
 
-        # Camera extrinsic: frame-0 anchoring into the dataset GT world (Method A). The frame-0
-        # GT pose A0 pins the global origin/orientation; Pi3X's own relative motion + metric scale
-        # carry the later frames. self.camera_pose itself stays untouched because the OCC stage
-        # above (world->camera per frame) depends on it. ``world_M`` is the model-world->GT-world
-        # rigid, reused for world-fusion so it lands in the SAME frame as camera_extrinsic_occ.
-        # GT (N1 action / Lerobot odom+hand-eye) is read once here; when unavailable the call
-        # falls back to frame-0 normalization (model frame-0 -> identity, C4 @ inv(P0) @ P @ C4).
+        # Camera extrinsic anchoring — per camera convention:
+        #   - N1 (opengl): frame-0 anchoring into the dataset GT world (Method A). The frame-0 GT
+        #     pose A0 pins the global origin/orientation; Pi3X's relative motion + metric scale
+        #     carry the later frames. (verified correct — left unchanged.)
+        #   - Lerobot (opencv): anchor the SAVED extrinsic to the frame-0 CAMERA (A0=I) instead of
+        #     the odom GT world, i.e. inv(P0) @ P[i] (OpenCV axes, robot-camera frame, aligned[0]=I).
+        #     The odom+hand-eye GT world reorientation A0 was making the downstream read Z reversed.
+        # self.camera_pose itself stays untouched because the OCC stage above (world->camera per
+        # frame) depends on it. ``world_M`` is the model-world->saved-frame rigid, reused for
+        # world-fusion so it lands in the SAME frame as camera_extrinsic_occ. GT is still read here
+        # (used for the traj_gt.ply / world overlays) but, for opencv, NOT used to anchor the save.
         self.gt_camera_pose_world = self.get_gt_poses(input_path)
+        gt_for_anchor = (
+            None if extrinsic_convention == "opencv" else self.gt_camera_pose_world
+        )
         aligned_poses, world_M = self._align_camera_poses_to_gt_world(
-            self.camera_pose, extrinsic_convention, self.gt_camera_pose_world
+            self.camera_pose, extrinsic_convention, gt_for_anchor
         )
         self.aligned_camera_pose_world = aligned_poses  # stashed for save_global_data overlay
         # GT-free convention-ONLY trajectory (C4 @ P @ C4, un-anchored) for the infer_cam_traj_R.ply
@@ -1381,14 +1399,13 @@ class InternNavDataGenerator(DataGenerator):
         _anchored = self.gt_camera_pose_world is not None and len(self.gt_camera_pose_world) > 0
         if aligned_poses is not None:
             all_camera_poses = [[row for row in pose] for pose in aligned_poses]
-            print(
-                "[extrinsic] camera_extrinsic_occ: "
-                + (
-                    "frame-0 anchored to GT world."
-                    if _anchored
-                    else "GT-free fallback (no GT; frame-0 normalized, aligned[0]=I)."
-                )
-            )
+            if extrinsic_convention == "opencv":
+                _msg = "frame-0 camera anchored (OpenCV, aligned[0]=I); GT used for diagnostics only."
+            elif _anchored:
+                _msg = "frame-0 anchored to GT world."
+            else:
+                _msg = "GT-free fallback (no GT; frame-0 normalized, aligned[0]=I)."
+            print("[extrinsic] camera_extrinsic_occ: " + _msg)
         else:
             print(
                 "[extrinsic] no camera poses to transform; keeping model-world camera poses (scaled)."

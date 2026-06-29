@@ -212,7 +212,7 @@ def run_dataset_pipeline(args):
                 extrinsic_convention=cam_convention,
                 z_deskew=z_deskew,
                 save_world_fusion=args.save_world_fusion,
-                export_frames=args.export_frames,
+                export_source_video=args.export_source_video,
                 # Export depth from the loader-resolved depth video regardless of --use_depth
                 # (media export is independent of model depth conditioning).
                 export_depth_path=depth_path,
@@ -325,7 +325,7 @@ if __name__ == "__main__":
         "--overwrite true to regenerate fusion for already-processed trajectories. Default: false.",
     )
     parser.add_argument(
-        "--export_frames",
+        "--export_source_video",
         type=_parse_bool,
         default=False,
         metavar="true|false",
