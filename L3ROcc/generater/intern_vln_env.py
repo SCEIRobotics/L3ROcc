@@ -5,6 +5,8 @@ import os
 import shutil
 import time
 
+import av
+import cv2
 import numpy as np
 import pandas as pd
 import open3d as o3d
@@ -1196,6 +1198,71 @@ class InternNavDataGenerator(DataGenerator):
 
         print(f"[world-fusion] saved {total_frames} frames -> {out_dir}")
 
+    def _export_lerobot_source_media(self, input_path, depth_video_path):
+        """Lerobot (opencv) only: faithfully export source media into the output trajectory.
+
+        Writes, under ``<save_path>/videos/chunk-000/``:
+          - ``observation.video.trajectory/episode_000000.mp4`` — verbatim copy of the source
+            RGB mp4 (fixed name).
+          - ``observation.images.rgb/<i>.jpg`` — every RGB frame (24-bit, native resolution).
+          - ``observation.images.depth/<i>.png`` — every depth frame (16-bit, native
+            resolution), only when ``depth_video_path`` is a 16-bit video.
+
+        ``depth_video_path`` is the loader-resolved depth video for THIS trajectory (independent
+        of ``--use_depth`` / model conditioning), so depth is exported whenever it exists.
+
+        No interval sampling / no resize: the frame count intentionally does NOT match the OCC
+        sequence. Mirrors the source-reading conventions in ``L3ROcc.utils.load_images_as_tensor``
+        (cv2.VideoCapture for RGB, PyAV gray16le for depth).
+        """
+        video_chunk_dir = os.path.join(self.save_path, "videos", "chunk-000")
+        rgb_dir = os.path.join(video_chunk_dir, "observation.images.rgb")
+        depth_dir = os.path.join(video_chunk_dir, "observation.images.depth")
+        traj_video_dir = os.path.join(video_chunk_dir, "observation.video.trajectory")
+        for d in (rgb_dir, depth_dir, traj_video_dir):
+            os.makedirs(d, exist_ok=True)
+
+        # 1. Copy the source RGB mp4 verbatim (fixed output name).
+        shutil.copy2(input_path, os.path.join(traj_video_dir, "episode_000000.mp4"))
+        print(f"   [export] copied RGB trajectory video -> {traj_video_dir}/episode_000000.mp4")
+
+        # 2. RGB frames: every frame, BGR straight to disk (cv2 imwrite expects BGR), native res.
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise IOError(f"[export] cannot open source RGB video: {input_path}")
+        n_rgb = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            cv2.imwrite(os.path.join(rgb_dir, f"{n_rgb}.jpg"), frame)
+            n_rgb += 1
+        cap.release()
+        print(f"   [export] wrote {n_rgb} RGB frames -> {rgb_dir}/<i>.jpg")
+
+        # 3. Depth frames: every frame, raw uint16 to 16-bit PNG, native res. Optional.
+        if not depth_video_path or not os.path.isfile(depth_video_path):
+            print("   [export] no depth video for this trajectory; skipping depth frame export.")
+            return
+
+        container = av.open(str(depth_video_path))
+        video_stream = container.streams.video[0]
+        pix_fmt = (video_stream.codec_context.pix_fmt or "").lower()
+        # gray16le / *16le 等含 "16"; 8-bit (yuv420p / gray / yuvj420p) 不含 -> 拒绝伪深度。
+        if not (("16" in pix_fmt) or ("gray16" in pix_fmt)):
+            container.close()
+            raise ValueError(
+                f"[export] depth video pix_fmt={pix_fmt!r} is not 16-bit; refusing to export "
+                f"fake 16-bit depth from {depth_video_path}. Provide a 16-bit (gray16le) depth video."
+            )
+        n_depth = 0
+        for av_frame in container.decode(video_stream):
+            d_map = av_frame.to_ndarray(format="gray16le")  # uint16, native resolution
+            cv2.imwrite(os.path.join(depth_dir, f"{n_depth}.png"), d_map)
+            n_depth += 1
+        container.close()
+        print(f"   [export] wrote {n_depth} depth frames -> {depth_dir}/<i>.png")
+
     def run_pipeline(
         self,
         input_path,
@@ -1208,6 +1275,8 @@ class InternNavDataGenerator(DataGenerator):
         extrinsic_convention=None,
         z_deskew=False,
         save_world_fusion=False,
+        export_frames=False,
+        export_depth_path=None,
     ):
         """
         Executes the full data generation pipeline:
@@ -1239,6 +1308,16 @@ class InternNavDataGenerator(DataGenerator):
                 to ``merge_npy_sequence_world/`` for ``tools/visual/npy_to_world_video.py``.
                 Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion
                 in the dataset GT world frame. Default False.
+            export_frames (bool, optional): Lerobot (opencv) only — also export the source RGB
+                mp4 frame-by-frame to ``videos/chunk-000/observation.images.rgb/<i>.jpg`` (24-bit,
+                native resolution), the source depth video frame-by-frame to
+                ``observation.images.depth/<i>.png`` (16-bit, native resolution), and copy the
+                source RGB mp4 verbatim to ``observation.video.trajectory/episode_000000.mp4``.
+                No interval sampling / no resize, so the frame count does NOT match the OCC
+                sequence (by design). N1 (opengl) is unaffected. Default False.
+            export_depth_path (str, optional): Loader-resolved depth video for THIS trajectory,
+                used for the depth-frame export above. Independent of ``condit_depth_path`` /
+                ``--use_depth`` so depth is exported whenever it exists. Defaults to None.
 
         Returns:
             None
@@ -1271,6 +1350,12 @@ class InternNavDataGenerator(DataGenerator):
             T_cam2base = self._fold_gravity_into_tcam2base(pcd, T_cam2base)
 
         paths = self.get_io_paths(input_path)
+
+        # Lerobot only: faithfully export the source RGB/depth frames + the RGB trajectory mp4
+        # so each output trajectory is self-contained. Like save_world_fusion, this only runs
+        # together with (re)generation, so use --overwrite true to re-export a processed traj.
+        if export_frames and extrinsic_convention == "opencv":
+            self._export_lerobot_source_media(input_path, export_depth_path)
 
         # Output is a separate dir: seed the source meta/ + base parquet so the in-place
         # update_* steps below have records to augment (otherwise they silently no-op).

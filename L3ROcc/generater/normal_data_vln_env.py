@@ -30,8 +30,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                         ├── observation.occ.view/
                         │   └── occ_sequence.npz
                         └── observation.video.trajectory/
-                            └── office.mp4
-                │       └── downsampled_pcd.ply
+                            └── episode_000000.mp4
+                │       
                 └── meta/
                     └── episode_stats.jsonl
                     └── episode.jsonl

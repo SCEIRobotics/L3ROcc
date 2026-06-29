@@ -2,6 +2,7 @@ import argparse
 import faulthandler
 import json
 import os
+import re
 import traceback
 
 import numpy as np
@@ -151,8 +152,12 @@ def run_dataset_pipeline(args):
                     None,
                 )
                 if rosbag_idx is not None:
-                    episode_id = os.path.splitext(path_parts[-1])[0]
-                    relative_path = os.path.join(path_parts[rosbag_idx], episode_id)
+                    episode_id = os.path.splitext(path_parts[-1])[0]  # e.g. "episode_000"
+                    m = re.search(r"(\d+)$", episode_id)
+                    traj_name = (
+                        f"trajectory_{int(m.group(1))}" if m else episode_id
+                    )
+                    relative_path = os.path.join(path_parts[rosbag_idx], traj_name)
                 else:
                     relative_path = f"trajectory_{i:06d}"
 
@@ -207,6 +212,10 @@ def run_dataset_pipeline(args):
                 extrinsic_convention=cam_convention,
                 z_deskew=z_deskew,
                 save_world_fusion=args.save_world_fusion,
+                export_frames=args.export_frames,
+                # Export depth from the loader-resolved depth video regardless of --use_depth
+                # (media export is independent of model depth conditioning).
+                export_depth_path=depth_path,
             )
 
             print("Processing successful!")
@@ -314,6 +323,16 @@ if __name__ == "__main__":
         "Reuses the in-memory OCC/pcd/poses (no second inference) and places the fusion in "
         "the dataset GT world frame. Only produced together with (re)generation, so use "
         "--overwrite true to regenerate fusion for already-processed trajectories. Default: false.",
+    )
+    parser.add_argument(
+        "--export_frames",
+        type=_parse_bool,
+        default=False,
+        metavar="true|false",
+        help="Lerobot(opencv) only: 额外把源 rgb mp4 逐帧导出为 observation.images.rgb/<i>.jpg、"
+        "源 depth mkv 逐帧导出为 observation.images.depth/<i>.png(16bit)，并把源 rgb mp4 原样"
+        "拷到 observation.video.trajectory/episode_000000.mp4。原分辨率、每一帧、不做采样。"
+        "仅在(重)生成时产出，已处理的轨迹需配合 --overwrite true。N1 无效。默认 false。",
     )
 
     # ---------- Multi-process data-parallel sharding (one process per GPU) ----------
