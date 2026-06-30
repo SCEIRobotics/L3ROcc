@@ -6,17 +6,9 @@ import pandas as pd
 
 
 class InternNavSequenceLoader:
-    """
-    A data loader for the InternNav dataset.
+    """Loads InternNav trajectories: indexes RGB / parquet / depth paths per episode."""
 
-    This class traverses the dataset directory structure to identify valid trajectory
-    sequences and manages paths for RGB images, metadata (Parquet), and video files.
-    """
-
-    # Candidate sub-directories (relative to a unit root) under which the RGB
-    # trajectory video may live. Probed in order; first hit wins.
-    # - observation.video.trajectory: InternData-N1 layout (one mp4 per trajectory)
-    # - observation.images.RGB / .rgb: lerobot rosbag layout (many episode_*.mp4 per rosbag)
+    # RGB trajectory video locations, probed in order; first hit wins.
     _RGB_CANDIDATE_DIRS = (
         "videos/chunk-000/observation.video.trajectory",
         "videos/chunk-000/observation.images.RGB",
@@ -24,8 +16,7 @@ class InternNavSequenceLoader:
     )
     _RGB_CANDIDATE_EXTS = (".mp4",)
 
-    # Candidate sub-directories (relative to a unit root) under which a depth
-    # video may live. Probed in order; first hit wins.
+    # Depth video locations, probed in order; first hit wins.
     _DEPTH_CANDIDATE_DIRS = (
         "videos/chunk-000/observation.video.depth",
         "videos/chunk-000/observation.images.depth",
@@ -35,9 +26,7 @@ class InternNavSequenceLoader:
     def __init__(self, root_dirs):
         self.root_dirs = root_dirs
 
-        # Per-episode entries. One element per (unit, episode) pair.
-        # `trajectory_dirs[i]` holds the unit root (rosbag_* or trajectory_*) the
-        # episode lives in; multiple episodes from the same rosbag share that root.
+        # One entry per (unit, episode) pair; trajectory_dirs[i] is the unit root.
         self.trajectory_dirs = []
         self.trajectory_data_paths = []   # episode_*.parquet
         self.trajectory_video_paths = []  # episode_*.mp4 (RGB)
@@ -47,19 +36,15 @@ class InternNavSequenceLoader:
 
     @staticmethod
     def _is_unit_dir(path):
-        """A unit holds the canonical chunk layout: ``data/chunk-000`` and
-        ``videos/chunk-000`` siblings. Covers both a lerobot ``rosbag_*`` and an
-        InternData-N1 ``trajectory_*``."""
+        """True if path has the canonical ``data/chunk-000`` + ``videos/chunk-000`` layout."""
         return os.path.isdir(os.path.join(path, "data", "chunk-000")) and os.path.isdir(
             os.path.join(path, "videos", "chunk-000")
         )
 
     def _iter_unit_dirs(self, root):
-        """Yield every unit directory under ``root``, auto-detecting layout:
-
-        1. ``root`` itself is a unit -> single rosbag / single trajectory passed directly.
-        2. ``root``'s immediate children are units -> rosbag parent (lerobot batch).
-        3. Otherwise fall back to InternData-N1 nesting: ``<group>/<scene>/<trajectory_*>``.
+        """Yield unit directories under ``root``, auto-detecting layout:
+        (1) root is a unit, (2) root's children are units (lerobot batch),
+        (3) InternData-N1 nesting ``<group>/<scene>/<trajectory_*>``.
         """
         if self._is_unit_dir(root):
             yield root
@@ -103,8 +88,7 @@ class InternNavSequenceLoader:
                         yield traj_path
 
     def _find_rgb_videos(self, unit_dir):
-        """Return ``[(video_path, episode_id), ...]`` for a unit. Empty list if none.
-        ``episode_id`` is the mp4 stem, used to pair parquet/depth by episode."""
+        """Return ``[(video_path, episode_id), ...]`` for a unit (episode_id = mp4 stem)."""
         for rel_dir in self._RGB_CANDIDATE_DIRS:
             cand = os.path.join(unit_dir, rel_dir)
             if not os.path.exists(cand):
@@ -123,13 +107,8 @@ class InternNavSequenceLoader:
         return []
 
     def _find_depth_video(self, unit_dir, episode_id=None):
-        """Probe conventional depth-video locations under a unit.
-
-        When ``episode_id`` is given, prefer a file whose stem equals it (lerobot
-        rosbag uses one depth file per episode). Otherwise return the first depth
-        file found, matching the single-trajectory InternData-N1 convention.
-        Depth is optional; absence returns None.
-        """
+        """Find a depth video under a unit. Prefer the file matching ``episode_id``,
+        else the first found. Returns None if absent (depth is optional)."""
         for rel_dir in self._DEPTH_CANDIDATE_DIRS:
             cand_dir = os.path.join(unit_dir, rel_dir)
             if not os.path.isdir(cand_dir):
@@ -148,12 +127,8 @@ class InternNavSequenceLoader:
         return None
 
     def _resolve_parquet(self, unit_dir, episode_id):
-        """Pair an episode mp4 with its parquet.
-
-        Tries ``data/chunk-000/{episode_id}.parquet`` first (matches the mp4 stem),
-        then falls back to the legacy ``episode_000000.parquet`` fixed name used by
-        early InternData-N1 trajectories.
-        """
+        """Pair an episode mp4 with its parquet: ``{episode_id}.parquet``,
+        else legacy fixed name ``episode_000000.parquet``."""
         chunk_dir = os.path.join(unit_dir, "data", "chunk-000")
         primary = os.path.join(chunk_dir, f"{episode_id}.parquet")
         if os.path.exists(primary):
@@ -164,11 +139,7 @@ class InternNavSequenceLoader:
         return None
 
     def _scan_dataset(self):
-        """Index every ``(unit, episode)`` pair under ``root_dirs``.
-
-        Supports both InternData-N1 nesting and lerobot rosbag layouts; see
-        ``_iter_unit_dirs`` for the detection rules.
-        """
+        """Index every ``(unit, episode)`` pair under ``root_dirs``."""
         print(f"Scanning dataset in {self.root_dirs}...")
 
         for unit_dir in self._iter_unit_dirs(self.root_dirs):
@@ -188,25 +159,14 @@ class InternNavSequenceLoader:
         return len(self.trajectory_dirs)
 
     def get_trajectory_info(self, index):
-        """
-        Retrieves information for a specific trajectory by index.
+        """Return (video_path, depth_path, camera_intrinsic, camera_extrinsic,
+        extrinsic_convention) for a trajectory.
 
-        Args:
-            index (int): The index of the trajectory sequence.
-
-        Returns:
-            tuple: (video_path, depth_path, camera_intrinsic, camera_extrinsic, extrinsic_convention)
-                - video_path (str): Absolute path to the RGB trajectory video file.
-                - depth_path (str or None): Absolute path to the depth video file if available.
-                - camera_intrinsic (np.ndarray or None): 3x3 camera intrinsic matrix.
-                - camera_extrinsic (np.ndarray or None): 4x4 camera to base extrinsic matrix.
-                - extrinsic_convention (str or None): camera convention selecting the
-                  OpenCV(Pi3X)->extrinsic basis change:
-                    * "opengl" -- extrinsic from InternData-N1 parquet observation.camera_extrinsic
-                      (3D-Front render camera, OpenGL Y-up/Z-back); downstream applies C=diag(1,-1,-1).
-                    * "opencv" -- extrinsic from Lerobot meta/info.json hand-eye R_cam2gripper
-                      (real camera, OpenCV Y-down, same as Pi3X); downstream applies no flip.
-                    * None -- no extrinsic.
+        extrinsic_convention selects the OpenCV(Pi3X)->extrinsic basis change:
+            * "opengl" -- InternData-N1 parquet observation.camera_extrinsic;
+              downstream applies C=diag(1,-1,-1).
+            * "opencv" -- Lerobot info.json hand-eye R_cam2gripper; no flip.
+            * None -- no extrinsic.
         """
 
         def _reshape_matrix(value, shape):
@@ -219,16 +179,15 @@ class InternNavSequenceLoader:
                 return np.stack(value)
             return None
 
-        # 1. Retrieve stored paths
+        # 1. Stored paths
         video_path = self.trajectory_video_paths[index]
         depth_path = self.trajectory_depth_paths[index]
         data_path = self.trajectory_data_paths[index]
         traj_root = self.trajectory_dirs[index]
 
-        # 2. Parse Parquet data to extract camera intrinsics / extrinsics
+        # 2. Parse parquet for camera intrinsics / extrinsics
         camera_intrinsic = None
         camera_extrinsic = None
-        # Set by whichever branch produces camera_extrinsic (see Returns).
         extrinsic_convention = None
 
         df = pd.read_parquet(data_path)
@@ -243,18 +202,14 @@ class InternNavSequenceLoader:
                 df["observation.camera_extrinsic"].tolist()[0], (4, 4)
             )
             if camera_extrinsic is not None:
-                # InternData-N1 render-camera extrinsics use the OpenGL convention.
-                extrinsic_convention = "opengl"
+                extrinsic_convention = "opengl"  # InternData-N1 render camera
 
         if camera_intrinsic is not None:
             print(
                 f"Loaded camera intrinsic for trajectory {index}: \n{camera_intrinsic}"
             )
 
-        # 3. Fallback: try meta/info.json for intrinsics and/or hand-eye extrinsic.
-        # lerobot parquet has neither observation.camera_intrinsic nor observation.camera_extrinsic,
-        # Both intrinsic and extrinsic parameters need to be retrieved from meta/info.json 
-        # (extrinsic = hand-eye calibration R_cam2gripper, cam->base rotation).
+        # 3. Fallback to meta/info.json (lerobot path: intrinsic + hand-eye R_cam2gripper).
         if camera_intrinsic is None or camera_extrinsic is None:
             info_json_path = os.path.join(traj_root, "meta", "info.json")
             if os.path.exists(info_json_path):
@@ -267,7 +222,7 @@ class InternNavSequenceLoader:
                     print(
                         f"Loaded head_camera_intrinsic from info.json for trajectory {index}."
                     )
-                # 手眼外参 -> T_cam2base(仅旋转参与下游 convert_pointcloud_camera_to_base)。
+                # 手眼外参 -> T_cam2base(仅旋转参与下游)。
                 ext = meta.get("head_camera_extrinsic", {})
                 if camera_extrinsic is None and "R_cam2gripper" in ext:
                     R_c2b = _reshape_matrix(ext["R_cam2gripper"], (3, 3))
@@ -282,8 +237,7 @@ class InternNavSequenceLoader:
                     if t_raw is not None:
                         T[:3, 3] = np.array(t_raw, dtype=float).reshape(3)
                     camera_extrinsic = T
-                    # Real hand-eye-calibrated camera uses OpenCV (same as Pi3X, no flip).
-                    extrinsic_convention = "opencv"
+                    extrinsic_convention = "opencv"  # real hand-eye camera, no flip
                     print(
                         f"Loaded head_camera_extrinsic.R_cam2gripper from info.json "
                         f"as T_cam2base for trajectory {index}."

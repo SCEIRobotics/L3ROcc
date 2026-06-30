@@ -31,23 +31,14 @@ from L3ROcc.utils import (
     voxels_to_pcd,
 )
 
-# NOTE: Pi3 / Pi3X are imported lazily inside _load_pretrained_model (see there).
-# Importing the model modules (dinov2 / flash-attention CUDA init) at top level breaks
-# safetensors' mmap load on Windows; the lazy import lets us pre-load weights to CPU first.
-from third_party.pi3.pi3.utils.basic import (  # Assuming you have a helper function
-    write_ply,
-)
-
-# from pi3.utils.geometry import homogenize_points
+# Pi3 / Pi3X are imported lazily inside _load_pretrained_model (Windows safetensors mmap).
+from third_party.pi3.pi3.utils.basic import write_ply
 from third_party.pi3.pi3.utils.geometry import depth_edge
 
 
 class DataGenerator:
-    """
-    Base class for data generation pipelines.
-    Handles 3D reconstruction, occupancy grid generation, ray casting for visibility,
-    and sequence data serialization.
-    """
+    """Base class for data-generation pipelines: 3D reconstruction, occupancy generation,
+    ray-cast visibility, and sequence serialization."""
 
     def __init__(
         self,
@@ -56,23 +47,9 @@ class DataGenerator:
         model_dir="./ckpt",
         model_type="pi3x",
     ):
-        """
-        Initialize the DataGenerator.
-
-        Args:
-            config_path (str): Path to the configuration YAML file.
-            save_dir (str): Directory where output files will be saved.
-            model_dir (str): Root directory containing ckpt sub-folders:
-                             model_dir/pi3x  -- Pi3X weights (accepts optional depth/intrinsic
-                                                conditioning at the model layer)
-                             model_dir/pi3   -- base Pi3 weights (RGB-only forward)
-            model_type (str): Which backbone to load. One of {"pi3", "pi3x"}.
-                              The checkpoint sub-directory is ``model_dir/<model_type>``.
-                              Pi3X.forward consumes depth/intrinsic kwargs when supplied;
-                              Pi3.forward only consumes imgs (any K/depth provided by the
-                              caller is still honored by post-processing — e.g. calibrated K
-                              still overrides the DLT-estimated K in the saved Parquet).
-        """
+        """Init the generator. Loads the ``model_dir/<model_type>`` checkpoint, where
+        ``model_type`` is "pi3" (RGB-only forward) or "pi3x" (depth/intrinsic conditioning);
+        both honor a calibrated K at post-processing."""
         if model_type not in {"pi3", "pi3x"}:
             raise ValueError(f"model_type must be 'pi3' or 'pi3x', got {model_type!r}")
 
@@ -82,8 +59,7 @@ class DataGenerator:
             os.makedirs(self.save_dir)
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Autocast dtype for model inference. Selected once: bfloat16 forces the model's
-        # FlashAttention SDPA path, which is not built into every torch distribution.
+        # Autocast dtype: bf16 forces the FlashAttention SDPA path (not in every torch build).
         self.amp_dtype = self._select_amp_dtype()
         self.model_type = model_type
         ckpt_path = os.path.join(model_dir, model_type)
@@ -127,17 +103,9 @@ class DataGenerator:
         self.save_path = self.save_dir
 
     def _load_pretrained_model(self, ckpt_path, model_type):
-        """Load Pi3X / Pi3 weights via the standard ``from_pretrained`` (returns CPU model;
-        caller moves it to device).
-
-        The model class is imported lazily here (not at module top) for two reasons:
-        (1) keep import side effects out of ``import L3ROcc.base``; and (2) on Windows,
-        ``from_pretrained`` segfaults unless an early importer has pre-loaded the safetensors
-        weights to CPU *before* the heavy imports (open3d / the model module) and monkeypatched
-        ``from_pretrained`` -- see ``tools/exp_scale/exp_scale_compare.py``. Because the import
-        is lazy, that monkeypatch (done before this module's deps are constructed) takes effect.
-        On Linux/server this is just the native fast path.
-        """
+        """Load Pi3X / Pi3 weights via ``from_pretrained`` (returns a CPU model). The model
+        class is imported lazily to avoid import side effects and the Windows safetensors
+        mmap segfault."""
         if model_type == "pi3x":
             from third_party.pi3.pi3.models.pi3x import Pi3X
 
@@ -147,15 +115,8 @@ class DataGenerator:
         return Pi3.from_pretrained(ckpt_path)
 
     def _select_amp_dtype(self):
-        """Choose the autocast dtype for model inference.
-
-        The Pi3 / Pi3X attention layers force the FlashAttention SDPA backend whenever the
-        tensors are bfloat16 (see third_party/pi3 .../layers/attention.py). That backend is
-        not compiled into every PyTorch build (notably the Windows CUDA wheels), which
-        raises ``RuntimeError: No available kernel``. We therefore use bfloat16 only when
-        the Flash kernel is actually runnable; otherwise float16, which the same layers
-        route through the mem-efficient / math SDPA kernels.
-        """
+        """Autocast dtype: bfloat16 only when the FlashAttention SDPA kernel is runnable
+        (it forces that backend), else float16."""
         if self.device != "cuda":
             return torch.float16
         try:
@@ -177,25 +138,11 @@ class DataGenerator:
     def pcd_reconstruction(
         self, input_path, condit_depth_path=None, intrinsics_np=None
     ):
-        """
-        Reconstructs the 3D point cloud and camera trajectory from video frames using the Pi3 model.
-
-        Args:
-            input_path (str): Path to the input video file.
-            condit_depth_path (str): Path to the conditional depth map (used by Pi3X only).
-            intrinsics_np (np.ndarray): 3x3 intrinsic matrix at the ORIGINAL video resolution.
-                - When model_type='pi3x', it is rescaled to model input size and fed to Pi3X.
-                - In both modes, the rescaled K replaces the DLT-estimated K in ``camera_intric_rs``
-                  so the downstream Parquet stores the calibrated K instead of the model's estimate.
-
-        Returns:
-            tuple:
-                - pcd : The reconstructed point cloud (N, 3).
-                - camera_pose : The estimated camera extrinsics (T, 4, 4).
-                - norm_cam_ray : Normalized camera ray directions (H*W, 3).
-        """
-        # Load all frames, resize to uniform size, and convert to Tensor [N, 3, H, W].
-        # When model_type='pi3x', also build the depth / intrinsic conditions for Pi3X.
+        """Reconstruct the 3D point cloud and camera trajectory from video via Pi3/Pi3X.
+        Returns ``(pcd (N,3), camera_pose (T,4,4), norm_cam_ray (H*W,3))``. ``intrinsics_np``
+        (original-resolution K) is rescaled and used both for Pi3X conditioning and to
+        override the DLT-estimated K in ``camera_intric_rs``."""
+        # Load + resize frames to [N, 3, H, W]; for pi3x also build depth/intrinsic conditions.
         imgs, traj_len, conditions = load_images_as_tensor(
             input_path,
             interval=self.interval,
@@ -204,12 +151,10 @@ class DataGenerator:
             device=self.device,
         )  # imgs: [N, 3, H, W] on self.device
 
-        # ``K_rescaled`` and ``depth_source`` are metadata, not Pi3X kwargs —
-        # pop them before splatting so ``model(**conditions)`` does not see unknown arguments.
+        # K_rescaled / depth_source are metadata, not Pi3X kwargs; pop before splatting.
         K_rescaled = conditions.pop("K_rescaled", None)
         conditions.pop("depth_source", None)
 
-        # Run model inference to get point clouds and camera poses
         print("Running model inference...")
         dtype = self.amp_dtype
         with torch.no_grad():
@@ -221,28 +166,15 @@ class DataGenerator:
                 else:
                     res = self.model(imgs[None])  # Add batch dimension [1, N, 3, H, W]
 
-        # # Filter noise using masks
-        # masks = (
-        #     torch.sigmoid(res["conf"][..., 0]) > 0.1
-        # )  # Retain high-confidence points
-        # non_edge = ~depth_edge(
-        #     res["local_points"][..., 2], rtol=0.03
-        # )  # Filter depth edges to sharpen point cloud boundaries
-
-        # Filter noise using masks
+        # Confidence + non-edge mask. With real sensor depth, relax both thresholds.
         if self.model_type == "pi3x" and (condit_depth_path is not None):
-            # 适度放宽带有真实传感器深度的检测：适当降低置信度，增加深度边缘容忍度
             masks = torch.sigmoid(res["conf"][..., 0]) > 0.05
-            non_edge = ~depth_edge(
-                res["local_points"][..., 2], rtol=0.15
-            )  # 容忍更大范围的深度突变
+            non_edge = ~depth_edge(res["local_points"][..., 2], rtol=0.15)
         else:
             masks = torch.sigmoid(res["conf"][..., 0]) > 0.1
             non_edge = ~depth_edge(res["local_points"][..., 2], rtol=0.03)
 
-        masks = torch.logical_and(masks, non_edge)[
-            0
-        ]  # Keep points that are both confident and non-edge
+        masks = torch.logical_and(masks, non_edge)[0]
 
         # Extract points and colors
         pcd = res["points"][0][masks]  # [N, H, W, 3]
@@ -274,11 +206,8 @@ class DataGenerator:
         ).permute(0, 2, 3, 1)
 
         norm_cam_ray_cam_coords = norm_cam_ray_cam_coords[0]
-        # Camera intrinsics at the resized model resolution.
-        # Prefer the calibrated K (rescaled to model input size) when an external intrinsic
-        # was supplied — the MVP experiment (tools/exp_intrinsic) showed RGB-only Pi3X
-        # back-calculates fx/fy with a systematic ~2-3% bias, while the calibrated K is
-        # known to be more accurate. Fall back to DLT estimation only when no real K is given.
+        # Camera intrinsics at model resolution: prefer the calibrated K when supplied
+        # (RGB-only Pi3X back-calculates fx/fy with ~2-3% bias), else DLT estimation.
         if K_rescaled is not None:
             self.camera_intric_rs = K_rescaled.astype(np.float32)
             print(
@@ -304,15 +233,14 @@ class DataGenerator:
         pcd_ocd.points = o3d.utility.Vector3dVector(pcd)
         pcd_ocd.colors = o3d.utility.Vector3dVector(pcd_color)
 
-        # 1. 执行统计学离群点剔除 (Statistical Outlier Removal)
-        # 能够有效铲除由真实深度图带来的漫天“飞点”，防止它们撑大场景包围盒
+        # 统计学离群点剔除：铲除真实深度图带来的飞点，避免撑大场景包围盒。
         pcd_ocd, ind = pcd_ocd.remove_statistical_outlier(
             nb_neighbors=30, std_ratio=2.0
         )
         pcd = np.asarray(pcd_ocd.points)
         pcd_color = np.asarray(pcd_ocd.colors)
 
-        # Calculate scene bounds robustly using 1% and 99% percentiles to avoid outliers inflating the volume
+        # Robust scene bounds via 1%/99% percentiles.
         if pcd.shape[0] > 100:
             q1 = np.percentile(pcd, 1, axis=0)
             q99 = np.percentile(pcd, 99, axis=0)
@@ -320,15 +248,14 @@ class DataGenerator:
         else:
             loc_range = pcd.max(0) - pcd.min(0)
 
-        loc_vol = np.prod(loc_range)  # Robust Total volume
+        loc_vol = np.prod(loc_range)  # robust total volume
         pcd_num = pcd.shape[0]
         frame_num = imgs.shape[0]
 
-        # 使密度估计与采样帧数解耦
+        # 密度估计与采样帧数解耦
         vol_per_point = loc_vol / max(pcd_num, 1) * frame_num  # m^3
         voxel_size = vol_per_point ** (1.0 / 3.0) * self.voxel_size_scale  # -> m
-        # clip仅作极值安全
-        voxel_size = float(np.clip(voxel_size, 0.01, 0.2))
+        voxel_size = float(np.clip(voxel_size, 0.01, 0.2))  # extreme-value safety
 
         # Voxel downsampling
         pcd_ocd = pcd_ocd.voxel_down_sample(voxel_size=voxel_size)
@@ -342,16 +269,8 @@ class DataGenerator:
         return pcd, camera_pose, norm_cam_ray_cam_coords.reshape(-1, 3)
 
     def pcd_to_occ(self, pcd):
-        """
-        Converts a point cloud into an occupancy representation.
-        Steps: Mesh Reconstruction -> Vertex Sampling -> Spatial Filtering -> Voxelization -> World Coord Recovery.
-
-        Args:
-            pcd : The input point cloud (N, 3).
-
-        Returns:
-            occ_pcd: Occupancy point cloud (M, 3).
-        """
+        """Voxelize a point cloud (N, 3) within ``pc_range`` into an occupancy
+        point cloud (M, 3) at voxel centers."""
         if not isinstance(pcd, torch.Tensor):
             device = self.device
             pcd = torch.from_numpy(pcd).float().to(device)
@@ -384,15 +303,8 @@ class DataGenerator:
         return occ_pcd
 
     def pcd_to_points(self, pcd):
-        """
-        Converts a point cloud into a set of points.
-
-        Args:
-            pcd : The input point cloud (N, 3).
-
-        Returns:
-            points: Point cloud in world coordinates (N, 3).
-        """
+        """Poisson-mesh a point cloud (N, 3) and return its vertices; falls back to the
+        raw points on failure or too few points."""
         # Convert to Open3D PointCloud object
         pcd = pcd.cpu().numpy() if isinstance(pcd, torch.Tensor) else pcd
         pcd = pcd.astype(np.float64)
@@ -413,7 +325,6 @@ class DataGenerator:
             if with_normal.has_normals():
                 normals = np.asarray(with_normal.normals)
                 if np.isnan(normals).any():
-                    # print("[Warning] NaN detected in normals! Cleaning...")
                     valid_normal_mask = np.isfinite(normals).all(axis=1)
                     clean_points = np.asarray(with_normal.points)[valid_normal_mask]
                     clean_normals = normals[valid_normal_mask]
@@ -450,18 +361,9 @@ class DataGenerator:
             return pcd
 
     def check_visual_occ(self, occ_pcd, T_cam2base=None):
-        """
-        Performs Ray Casting to check which occupancy voxels are visible from the current camera pose.
-
-        Args:
-            occ_pcd : Occupancy point cloud in Base Coordinates (N, 3).
-            T_cam2base : Camera to Base Transformation Matrix (4, 4).
-
-        Returns:
-            tuple:
-                - occ_voxels : Visible occupied voxels in Base Coordinates (K, 3).
-                - camera_visible_mask : All voxels traversed by rays (Free + Occupied) in Base Coordinates (M, 3).
-        """
+        """Ray-cast from the camera to find visible occupancy voxels. Returns
+        ``(occ_voxels (K,3) visible occupied, camera_visible_mask (M,3) all traversed)``
+        as voxel indices."""
         # Transform Camera Coords to Voxel Indices
         occ_voxels = pcd_to_voxels(
             occ_pcd, self.voxel_size, self.pc_range
@@ -581,10 +483,7 @@ class DataGenerator:
         return occ_voxels, camera_visible_mask
 
     def convert_pointcloud_world_to_camera(self, points_world, T_cw):
-        """
-        Transforms point cloud from World to Camera frame.
-        Supports both Numpy and PyTorch Tensor (GPU).
-        """
+        """World -> camera frame. ``P_cam = (P_world - t_cw) @ R_cw``. Numpy or torch."""
         # 1. Tensor Mode (GPU Optimized)
         if isinstance(points_world, torch.Tensor):
             if not isinstance(T_cw, torch.Tensor):
@@ -594,10 +493,6 @@ class DataGenerator:
 
             R_cw = T_cw[:3, :3]
             t_cw = T_cw[:3, 3]
-
-            # Logic: P_cam = (P_world - t_cw) @ R_cw
-            # Note: R_wc = R_cw.T. The formula is P_cam = (R_wc @ (P_world - t_cw).T).T
-            # Which simplifies to: (P_world - t_cw) @ R_wc.T => (P_world - t_cw) @ R_cw
             points_camera = (points_world - t_cw) @ R_cw
             return points_camera
 
@@ -612,16 +507,7 @@ class DataGenerator:
             return points_camera.astype(np.float32)
 
     def convert_pointcloud_camera_to_world(self, points_camera, T_cw):
-        """
-        Transforms point cloud from Camera Coordinate System to World Coordinate System.
-
-        Args:
-            points_camera : Points in camera frame (N, 3).
-            T_cw : Camera extrinsic matrix (4, 4).
-
-        Returns:
-            points_world: Points in world frame (N, 3).
-        """
+        """Camera -> world frame. ``P_world = R_cw @ P_cam + t_cw``."""
         if points_camera is None or len(points_camera) == 0:
             return np.zeros((0, 3), dtype=np.float32)
 
@@ -633,23 +519,12 @@ class DataGenerator:
 
         R_cw = T_cw[:3, :3]
         t_cw = T_cw[:3, 3]
-
-        # Formula: P_world = R * P_cam + t
         points_world = (R_cw @ points_camera.T).T + t_cw
 
         return points_world.astype(np.float32)
 
     def convert_pointcloud_camera_to_base(self, points_camera, T_cam2base):
-        """
-        Transforms point cloud from Camera Coordinate System to Robot Base Coordinate System (Rotation ONLY).
-
-        Args:
-            points_camera : Points in camera frame (N, 3).
-            T_cam2base : Camera to Base  extrinsic matrix (4, 4).
-
-        Returns:
-            points_base: Points in base frame (N, 3).
-        """
+        """Camera -> robot base frame, rotation only. ``P_base = P_cam @ R_c2b.T``."""
         if points_camera is None or len(points_camera) == 0:
             if isinstance(points_camera, torch.Tensor):
                 return torch.zeros(
@@ -665,8 +540,6 @@ class DataGenerator:
                 )
 
             R_c2b = T_cam2base[:3, :3]
-            # col：P_base= P_cam@ R_c2b
-            # row：P_base.T = P_cam.T @ R_c2b.T
             points_base = torch.matmul(points_camera, R_c2b.T)
             return points_base
 
@@ -676,27 +549,14 @@ class DataGenerator:
                 points_camera = points_camera.reshape(1, -1)
 
             R_c2b = T_cam2base[:3, :3]
-
-            # Formula: P_base = P_cam @ R_b2c
             points_base = points_camera @ R_c2b.T
             return points_base.astype(np.float32)
 
     def get_temporal_occ(
         self, new_occ_world, current_pose_matrix, save_to_history=False
     ):
-        """
-        Accumulates OCC data over a sliding window and transforms it to the current camera frame.
-
-        Args:
-            new_occ_world : New OCC points from current frame in World Coordinates (N, 3).
-            current_pose_matrix : Current camera pose (4, 4) in World Coordinates.
-            save_to_history : If True, appends current data to the sliding buffer.
-
-        Returns:
-            tuple:
-                - merged_occ_cam : Accumulated OCC in current camera frame (M, 3).
-                - merged_occ_world : Accumulated OCC in world frame (M, 3).
-        """
+        """Accumulate OCC over the sliding-window buffer (optionally append this frame) and
+        return ``(merged_occ_cam, merged_occ_world)``, voxel-downsampled."""
         # Save current frame to history buffer if requested
         if save_to_history and len(new_occ_world) > 0:
             self.occ_history_buffer.append(new_occ_world)
@@ -736,59 +596,19 @@ class DataGenerator:
         return merged_occ_cam, merged_occ_world
 
     def get_gt_poses(self, input_path):
-        """
-        Retrieves Ground Truth (GT) camera trajectories.
-        Should be overridden by subclasses.
-
-        Args:
-            input_path (str): Path to the input data directory.
-
-        Returns:
-            np.ndarray or None: Array of shape (N, 4, 4) if GT exists, else None.
-        """
+        """GT camera poses (N, 4, 4) or None. Override in subclasses."""
         return None
 
     def compute_trajectory_scale(self, poses_gt, poses_pred):
-        """
-        Computes the scale ratio (GT / Pred) between predicted and ground truth trajectories.
-        Uses the ratio of standard deviations (Sim3 scale estimation).
-
-        Args:
-            poses_gt : Ground truth poses (N, 4, 4).
-            poses_pred : Predicted poses (N, 4, 4).
-
-        Returns:
-            scale or 1.0: The calculated scale factor. Returns 1.0 if calculation fails or input is invalid.
-        """
+        """Sim3 scale ratio (GT / Pred). Override in subclasses; default 1.0."""
         return 1.0
 
     def align_with_gt_scale(self, input_path, pcd):
-        """
-        Attempts to align the predicted point cloud scale with Ground Truth.
-        Dependent on `get_gt_poses`.
-
-        Args:
-            input_path : Path to the input data.
-            pcd : The predicted point cloud (N, 3).
-
-        Returns:
-            tuple:
-                - pcd : The scaled point cloud.
-                - scale : The applied scale factor.
-        """
+        """Align the predicted pcd scale to GT. Override in subclasses; default no-op."""
         return pcd, 1.0
 
     def get_io_paths(self, input_path):
-        """
-        Defines output file paths.
-        Subclasses can override this for complex directory structures.
-
-        Args:
-            input_path : The input file or directory path.
-
-        Returns:
-            paths: A dictionary containing paths for 'ply', 'global_occ', 'occ_seq', and 'mask_seq'.
-        """
+        """Return output paths (ply, global_occ, occ_seq, mask_seq). Subclasses may override."""
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         if not os.path.exists(self.save_path):
             os.makedirs(self.save_path)
@@ -800,15 +620,8 @@ class DataGenerator:
         }
 
     def save_global_data(self, paths):
-        """
-        Saves global point cloud and global occupancy map.
-
-        Args:
-            paths : A dictionary of file paths (output of `get_io_paths`).
-
-        Returns:
-            None: Saves files to disk.
-        """
+        """Save the global point cloud (.ply), per-stage camera trajectory plys, and the
+        last-frame occupancy map (.npz)."""
 
         pcd_to_save = self.pcd
         if isinstance(pcd_to_save, torch.Tensor):
@@ -820,10 +633,8 @@ class DataGenerator:
 
         write_ply(pcd_to_save, pcd_color_to_save, paths["ply"])
 
-        # Write each camera trajectory to its own single-color ply (no overlay), so the four
-        # stages — model-raw / GT-free convention-only (C4@P@C4) / pipeline frame-0 anchored /
-        # GT — can be compared by loading the files together. All run_pipeline-set; each is
-        # skipped (gracefully) when its source is absent (e.g. no GT -> traj_gt.ply skipped).
+        # Write each camera trajectory to its own single-color ply (model-raw / convention-only
+        # / frame-0 anchored / GT) for side-by-side comparison; skip when its source is absent.
         traj_dir = os.path.dirname(paths["ply"])
 
         def _save_traj_ply(poses, filename, rgb):
@@ -872,19 +683,8 @@ class DataGenerator:
         print(f"Saved Last Frame Occ Data to {paths['global_occ']}")
 
     def save_sequence_data(self, paths, sparse_occ_indices, packed_mask_data):
-        """
-        Saves sequence data to disk.
-        - OCC: Stored as Sparse CSR Matrix in .npz format.
-        - Mask: Stored as Packed Bit Array in .npz format.
-
-        Args:
-            paths : Dictionary containing 'occ_seq' and 'mask_seq' paths.
-            sparse_occ_indices : Array of sparse indices (Frame, X, Y, Z).
-            packed_mask_data : Compressed bitmask array.
-
-        Returns:
-            None: Saves files to disk.
-        """
+        """Save the OCC sequence as a sparse CSR matrix (.npz) and the visibility mask as a
+        packed bit array (.npz)."""
         import scipy.sparse as sparse
 
         N = len(self.camera_pose)
@@ -934,32 +734,17 @@ class DataGenerator:
         extrinsic_convention=None,
         z_deskew=False,
     ):
-        """
-        Computes sequential data for the entire trajectory, including sparse OCC indices
-        and compressed visibility masks.
-
-        Args:
-            None
-
-        Returns:
-            tuple:
-                - final_occ : Sparse OCC indices (N, 4) -> [Frame, X, Y, Z].
-                - final_mask_packed : Compressed mask data.
-                - all_camera_poses : List of camera poses.
-                - all_camera_intrinsics : List of camera intrinsics.
-        """
+        """Compute per-frame OCC for the whole trajectory. Returns
+        ``(final_occ (N,4) [frame,x,y,z], final_mask_packed, all_camera_poses,
+        all_camera_intrinsics)``."""
         total_frames = len(self.camera_pose)
         grid_dims = self.config["occ_size"]  # (H, W, D)
         device = self.device
 
-        # Per-dataset base-frame normalization (from the loader's extrinsic_convention), folded
-        # into T_cam2base so every R_c2b path stays consistent (point cloud, last-frame
-        # trajectory, check_visual_occ rays) and all datasets land in ONE canonical base frame
-        # (forward=+y, lateral=±x, up=+z) — letting a single pc_range / occ_size serve both:
-        #   - "opengl" (N1 rendered extrinsics): camera-side C=R_OPENCV_TO_OPENGL (R_eff=R_c2b @ C),
-        #     else base/OCC flips 180 deg about X; this already yields forward=+y.
-        #   - "opencv" (LeRobot hand-eye): base is ROS-style forward=+x, so left-multiply a +90 deg
-        #     yaw R_BASE_CANON_OPENCV (R_eff = Rz90 @ R_c2b) to bring forward +x -> +y.
+        # Per-dataset base-frame normalization folded into T_cam2base so all datasets land in
+        # one canonical base frame (forward=+y, up=+z):
+        #   - "opengl" (N1): right-multiply C=R_OPENCV_TO_OPENGL (R_eff = R_c2b @ C).
+        #   - "opencv" (LeRobot): left-multiply +90° yaw R_BASE_CANON_OPENCV (R_eff = Rz90 @ R_c2b).
         if T_cam2base is not None:
             T_cam2base = np.array(T_cam2base, dtype=np.float32)
             if extrinsic_convention == "opengl":
@@ -995,8 +780,8 @@ class DataGenerator:
         self.occ_per_frame_T_cam2base = None
         per_frame_T_list = []
 
-        # Method A: per-frame ego ground leveling (Lerobot/opencv, only when z_deskew is on),
-        # on top of the frame-0 fold in T_cam2base. None -> no per-frame leveling.
+        # Per-frame ego ground leveling (Lerobot/opencv, z_deskew only), on top of the
+        # frame-0 fold in T_cam2base. None -> no per-frame leveling.
         per_frame_R_level = None
         if z_deskew and extrinsic_convention == "opencv" and T_cam2base is not None:
             _level_t0 = time.time()
@@ -1008,10 +793,7 @@ class DataGenerator:
                 f"{time.time() - _level_t0:.3f}s"
             )
 
-        # Per-frame ground-tilt diagnostic on the leveled pcd_points_base (read-only): with
-        # leveling on every sampled frame should read ~0. Sample evenly-spaced frames (incl.
-        # 0 and last). Only meaningful for the z-deskew path, so skip it (no diag prints)
-        # when z_deskew is off.
+        # Per-frame ground-tilt diagnostic (read-only) on evenly-spaced frames; z-deskew path only.
         diag_frames = (
             set(np.linspace(0, total_frames - 1, min(total_frames, 25)).astype(int).tolist())
             if (z_deskew and total_frames > 0)
@@ -1029,9 +811,8 @@ class DataGenerator:
 
             pcd_points_cam *= scale
 
-            # Per-frame leveling (Method A): rotate this frame's base by R_level[i] on top of
-            # the shared T_cam2base. T_cam2base_i drives every R_c2b path for this frame (point
-            # cloud, last-frame trajectory, check_visual_occ rays) so they stay consistent.
+            # Per-frame leveling: rotate this frame's base by R_level[i] on top of the shared
+            # T_cam2base, giving T_cam2base_i that drives every R_c2b path for this frame.
             if per_frame_R_level is not None:
                 T_cam2base_i = np.array(T_cam2base, dtype=np.float32)
                 T_cam2base_i[:3, :3] = (
@@ -1088,8 +869,7 @@ class DataGenerator:
         occ_end = time.time()
         print(f"GPU OCC Sequence cost: {occ_end - occ_start:.4f}s")
 
-        # Stash per-frame cam->base transforms (4x4); run_pipeline uses them (with the raw
-        # hand-eye) to derive and persist the per-frame deskew. Empty only when T_cam2base is None.
+        # Stash per-frame cam->base transforms; run_pipeline uses them to persist the deskew.
         if per_frame_T_list:
             self.occ_per_frame_T_cam2base = np.stack(per_frame_T_list).astype(np.float32)
 
@@ -1133,30 +913,11 @@ class DataGenerator:
     def update_metadata(
         self, paths, all_camera_poses, all_camera_intrinsics, input_path
     ):
-        """
-        Update Parquet metadata (to be implemented by subclass).
-
-        Args:
-            paths : Output paths.
-            all_camera_poses : List of camera poses.
-            all_camera_intrinsics : List of camera intrinsics.
-            input_path : Input video path.
-
-        Returns:
-            None
-        """
+        """Update parquet metadata. Override in subclasses."""
         pass
 
     def update_meta_episodes_jsonl(self, scale):
-        """
-        Update episodes.jsonl metadata (to be implemented by subclass).
-
-        Args:
-            scale : The calculated scale factor.
-
-        Returns:
-            None
-        """
+        """Update episodes.jsonl metadata. Override in subclasses."""
         pass
 
     # Single-frame OCC pipeline
@@ -1168,22 +929,11 @@ class DataGenerator:
         pcd_save=False,
         mesh=False,
     ):
-        """
-        Generates estimated OCC map and camera trajectory from a full video episode.
-
-        Args:
-            input_path : Path to the input video.
-            condit_depth_path : Path to the conditional depth map (Pi3X only).
-            intrinsics_np : 3x3 intrinsic matrix (Pi3X only).
-            pcd_save : If True, saves visualization files (occ.ply, etc.).
-
-        Returns:
-            None: Sets self.camera_pose, and optionally saves files.
-        """
+        """Frame-0 OCC map + camera trajectory from a video; optionally saves viz plys/npys."""
         self.camera_intric = np.array(
             [[168.0498, 0.0, 240.0], [0.0, 192.79999, 135.0], [0.0, 0.0, 1.0]],
             dtype=np.float32,
-        )  # Temporary hardcoded intrinsics
+        )  # temporary hardcoded intrinsics
 
         # Reconstruct PCD and Trajectory
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
@@ -1244,20 +994,9 @@ class DataGenerator:
         mesh=False,
         max_frames=None,
     ):
-        """
-        Executes the full visualization pipeline with sliding window accumulation.
-        Generates PLY/NPY files for merged views, solo OCC, and sequence data.
-
-        Args:
-            input_path : Path to the input video.
-            condit_depth_path : Path to the conditional depth map (Pi3X only).
-            intrinsics_np : 3x3 intrinsic matrix (Pi3X only).
-            pcd_save : Must be True to trigger the visualization logic.
-            max_frames : If set, cap the trajectory to this many frames (quick verification).
-
-        Returns:
-            None: Output files are saved to self.save_path.
-        """
+        """Full visualization pipeline with sliding-window accumulation: writes merged-view /
+        solo-OCC PLY+NPY per frame to self.save_path. ``pcd_save`` must be True; ``max_frames``
+        caps the trajectory for quick verification."""
 
         # Reconstruct global map and trajectory
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(
@@ -1575,19 +1314,7 @@ class DataGenerator:
     def run_pipeline(
         self, input_path, condit_depth_path=None, intrinsics_np=None, pcd_save=True
     ):
-        """
-        Executes the full data generation pipeline:
-        Reconstruction -> Global Storage -> Sequence Calculation
-
-        Args:
-            input_path (str): Path to the input video file.
-            condit_depth_path (str): Path to the conditional depth map (Pi3X only).
-            intrinsics_np : 3x3 intrinsic matrix (Pi3X only).
-            pcd_save (bool, optional): Whether to save 3D artifacts (point cloud, etc.). Defaults to True.
-
-        Returns:
-            None
-        """
+        """Run the base pipeline: reconstruction -> global storage -> sequence calculation."""
 
         # 3D Reconstruction
         pcd, self.camera_pose, self.norm_cam_ray = self.pcd_reconstruction(

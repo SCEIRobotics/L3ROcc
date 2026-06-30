@@ -7,8 +7,7 @@ import traceback
 
 import numpy as np
 
-# Set environment variables to limit thread usage for numerical libraries
-# This is often necessary to prevent CPU oversubscription in multi-process environments
+# Limit numerical-library threads (avoid CPU oversubscription).
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -17,8 +16,6 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 
 from L3ROcc.dataset.intern_nav_adapter import InternNavSequenceLoader
-
-# Import custom modules after setting up the path
 from L3ROcc.generater.intern_vln_env import InternNavDataGenerator
 
 
@@ -45,10 +42,8 @@ def _load_intrinsics_from_json(json_path):
 
 
 def run_dataset_pipeline(args):
-    """
-    Main pipeline function to load trajectory data and generate OCC (Occupancy) data.
-    """
-    # ================= 1. Configuration Parameters =================
+    """Load trajectory data and generate OCC data."""
+    # ================= 1. Configuration =================
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     dataset_root = args.dataset_root
@@ -66,7 +61,7 @@ def run_dataset_pipeline(args):
     model_dir = os.path.join(project_root, "ckpt")
     config_path = os.path.join(project_root, "L3ROcc", "configs", "config.yaml")
 
-    # -------- Consistency hints (mirror run_normal_data_occ.py) --------
+    # -------- Consistency hints --------
     if use_depth and is_pi3:
         print(
             "[Warning] use_depth=True but model_type='pi3'. "
@@ -102,7 +97,7 @@ def run_dataset_pipeline(args):
         f"Initializing OCC Generator  model_type={args.model_type}  "
         f"use_depth={use_depth}  use_intrinsic={use_intrinsic}"
     )
-    # save_dir is a temporary root here; it gets overridden per-trajectory below.
+    # save_dir overridden per-trajectory below.
     generator = InternNavDataGenerator(
         config_path=config_path,
         save_dir=output_root,
@@ -110,9 +105,7 @@ def run_dataset_pipeline(args):
         model_type=args.model_type,
     )
 
-    # Optional external intrinsic JSON (overrides the loader-resolved K when present;
-    # loader K comes from parquet observation.camera_intrinsic or, as fallback,
-    # per-trajectory meta/info.json head_camera_intrinsic — lerobot v2.1 only has the latter)
+    # Optional external intrinsic JSON; overrides the loader-resolved K when present.
     cli_intrinsics_np = (
         _load_intrinsics_from_json(args.condit_intr_path) if use_intrinsic else None
     )
@@ -128,7 +121,7 @@ def run_dataset_pipeline(args):
         if args.num_shards > 1 and (i % args.num_shards) != args.shard_index:
             continue
         try:
-            # A. Retrieve info from the loader (returns depth_path between video and intrinsic)
+            # A. Get trajectory info from the loader.
             video_path, depth_path, cam_intrinsics, cam_extrinsics, cam_convention = (
                 loader.get_trajectory_info(i)
             )
@@ -139,7 +132,7 @@ def run_dataset_pipeline(args):
 
             input_path_for_gen = video_path
 
-            # B. Construct the specific output path for this trajectory.
+            # B. Build per-trajectory output path.
             # InternData-N1: output_root / <group> / <scene> / <trajectory_*>
             # lerobot rosbag: output_root / <rosbag_*> / <episode_id>
             path_parts = video_path.split(os.sep)
@@ -181,8 +174,7 @@ def run_dataset_pipeline(args):
                         f"under trajectory; proceeding without depth conditioning."
                     )
 
-            # Intrinsic priority: CLI JSON override > loader (parquet observation.camera_intrinsic,
-            # else meta/info.json head_camera_intrinsic) > None (DLT fallback)
+            # Intrinsic priority: CLI JSON > loader K > None (DLT fallback).
             intrinsics_np = None
             if use_intrinsic:
                 if cli_intrinsics_np is not None:
@@ -213,8 +205,7 @@ def run_dataset_pipeline(args):
                 z_deskew=z_deskew,
                 save_world_fusion=args.save_world_fusion,
                 export_source_video=args.export_source_video,
-                # Export depth from the loader-resolved depth video regardless of --use_depth
-                # (media export is independent of model depth conditioning).
+                # Media export is independent of --use_depth conditioning.
                 export_depth_path=depth_path,
             )
 
