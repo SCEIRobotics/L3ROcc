@@ -4,12 +4,24 @@
 'downsample': False
 'voxel_size': 0.04
 'max_nn': 20
-'pc_range':  [-2, -5.6, -0.6, 2, 0, 1.8]
+# pc_range / occ_size 在统一的 canonical base 系下（forward=+y, lateral=±x, up=+z）。
+# 两数据集都被规范化到该系：N1(opengl) 折 C=diag(1,-1,-1)，LeRobot(opencv) 额外折 Rz(90°)
+# 把 forward 从 +x 转到 +y（见 base.py compute_sequence_data）。故单套配置对两者通用。
+# base 系相机锚定（camera->base 仅旋转、相机恒在 z=0）：相机装在地面上方、看向前下方，
+# 可通行/地面区域在相机下方，故 z 取下方 1.8m（z_min=-1.8）、上方 0.6m（z_max=0.6）。
+'pc_range':  [-2, 0, -1.8, 2, 5.6, 0.6]
 'occ_size':  [100, 140, 60]
 'self_range': [3.0, 1.5, 2.0]
 'ray_cast_step_size': 1.0
 'interval': 10
-'voxel_size_scale': 100.0
+'voxel_size_scale': 0.5 # 越小越稠密
 'history_len': 10
 'history_step': 2
 'fps': 30.0
+# GT-free 世界系对齐：metric 尺度修正系数。默认 1.0 = 直接信任 Pi3X metric_head。
+# 实验测得真实(lerobot/ZED)数据 pred/sensor≈0.92(偏小~8%)，如需补偿可设 ~1.08；合成(N1)≈1.0 保持 1.0。
+'metric_scale_correction': 1.0
+# OpenCV->OpenGL 基变换矩阵：diag(1,-1,-1)，翻转 Y/Z 轴（绕相机 X 轴 180°）
+'R_OPENCV_TO_OPENGL': [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+# LeRobot(opencv) base 系规范化：+90° yaw，将 ROS forward+x 旋转到 canonical forward+y
+'R_BASE_CANON_OPENCV': [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]

@@ -13,7 +13,7 @@
 
 **/__pycache__/
 
-.vscode
+/.vscode
 ckpts
 
 /checkpoints
@@ -37,5 +37,10 @@ demo_gradio.py
 example.py
 pyproject.toml
 
-/tools/exp_scale/exp_out
-.claude
+/.claude
+.zed/
+/tools/run_bash
+/tools/exp_sum
+/tools/run_exp_bash
+/tools/exp_coord_align
+/tools/exp_metric_scale

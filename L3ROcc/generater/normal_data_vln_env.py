@@ -21,8 +21,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                 ├── data/
                 │   └── chunk-000/
                 │       ├── episode_000000.parquet
-                │       ├── all_occ.npz
-                │       └── origin_pcd.ply
+                │       ├── last_frame_occ.npz
+                │       └── downsampled_pcd.ply
                 └── videos/
                     └── chunk-000/
                         ├── observation.occ.mask/
@@ -30,8 +30,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                         ├── observation.occ.view/
                         │   └── occ_sequence.npz
                         └── observation.video.trajectory/
-                            └── office.mp4
-                │       └── origin_pcd.ply
+                            └── episode_000000.mp4
+                │       
                 └── meta/
                     └── episode_stats.jsonl
                     └── episode.jsonl
@@ -39,8 +39,8 @@ class SimpleVideoDataGenerator(DataGenerator):
                     └── tasks.jsonl
     """
 
-    def __init__(self, config_path, save_dir, model_dir, use_multimodal=True):
-        super().__init__(config_path, save_dir, model_dir, use_multimodal=use_multimodal)
+    def __init__(self, config_path, save_dir, model_dir, model_type="pi3x"):
+        super().__init__(config_path, save_dir, model_dir, model_type=model_type)
         self.default_group = "custom_videos"
         self.default_traj_name = "trajectory_0"
 
@@ -77,8 +77,8 @@ class SimpleVideoDataGenerator(DataGenerator):
 
         # 3. File Paths
         paths = {
-            "ply": os.path.join(self.data_chunk_dir, "origin_pcd.ply"),
-            "global_occ": os.path.join(self.data_chunk_dir, "all_occ.npz"),
+            "ply": os.path.join(self.data_chunk_dir, "downsampled_pcd.ply"),
+            "global_occ": os.path.join(self.data_chunk_dir, "last_frame_occ.npz"),
             "parquet": os.path.join(self.data_chunk_dir, "episode_000000.parquet"),
             "occ_seq": os.path.join(self.occ_view_dir, "occ_sequence.npz"),
             "mask_seq": os.path.join(self.occ_mask_dir, "mask_sequence.npz"),

@@ -170,7 +170,7 @@ def ransac_pcd_registration(
     best_mask (np.ndarray): Boolean array marking inliers.
     """
 
-    def warp_3d(pts, R, t, s):
+    def _warp_3d(pts, R, t, s):
         """
         Applies transformation to 3D point cloud: rotation R, translation t, scaling s.
         """
@@ -202,7 +202,7 @@ def ransac_pcd_registration(
         )
 
         # 2. Apply transformation to all points
-        transformed_src = warp_3d(src_pts, R, t, s)
+        transformed_src = _warp_3d(src_pts, R, t, s)
 
         # 3. Compute reprojection errors
         errors = np.linalg.norm(transformed_src - dst_pts, axis=1)
@@ -769,6 +769,327 @@ def convert_pointcloud_camera_to_world(points_camera, T_cw):
     return points_world
 
 
+def ground_tilt_deg(pcd_base):
+    """Diagnostic: RANSAC ground-plane tilt (deg) vs +Z for a base-frame cloud.
+
+    Sign-agnostic; NaN on too-few-points/failure. Read-only profiling, no OCC effect.
+    """
+    try:
+        pts = np.asarray(pcd_base, dtype=np.float64)
+        if pts.shape[0] < 100:
+            return float("nan")
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+        plane, _inliers = o3d_pcd.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        n = np.asarray(plane[:3], dtype=np.float64)
+        n /= max(np.linalg.norm(n), 1e-12)
+        return float(np.degrees(np.arccos(np.clip(abs(n[2]), -1.0, 1.0))))
+    except Exception as e:
+        print(f"[Tilt-diag] per-frame ground RANSAC failed: {e}")
+        return float("nan")
+
+
+def ground_R_to_z(pts, cam_centers, min_inlier_frac=0.10):
+    """Per-frame leveling helper: RANSAC the ground of a base-frame cloud and return the
+    Rodrigues rotation (ground normal -> +Z), normal oriented by "camera above ground".
+
+    Returns ``(R (3,3) f64, inlier_frac, tilt_before_deg)`` or ``None`` if unreliable
+    (too few points / inlier_frac < ``min_inlier_frac`` / failure). Quiet and non-raising
+    (unlike ``gravity_R_to_z``), so safe to call once per frame.
+    """
+    try:
+        pts = np.asarray(pts, dtype=np.float64)
+        if pts.shape[0] < 200:
+            return None
+        o3d_pcd = o3d.geometry.PointCloud()
+        o3d_pcd.points = o3d.utility.Vector3dVector(pts)
+        plane, inliers = o3d_pcd.segment_plane(
+            distance_threshold=0.05, ransac_n=3, num_iterations=300
+        )
+        a, b, c, d = plane
+        n = np.array([a, b, c], dtype=np.float64)
+        cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+        if np.mean(cc @ n + d) < 0:  # camera should sit above the ground
+            n = -n
+        n /= max(np.linalg.norm(n), 1e-12)
+        inlier_frac = len(inliers) / max(pts.shape[0], 1)
+        if inlier_frac < min_inlier_frac:
+            return None
+        tilt = float(np.degrees(np.arccos(np.clip(n[2], -1.0, 1.0))))
+        target = np.array([0.0, 0.0, 1.0])
+        axis = np.cross(n, target)
+        s_axis = float(np.linalg.norm(axis))
+        c_axis = float(np.dot(n, target))
+        if s_axis <= 1e-6:
+            return np.eye(3), inlier_frac, tilt
+        k = axis / s_axis
+        K = np.array(
+            [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]],
+            dtype=np.float64,
+        )
+        R = np.eye(3) + s_axis * K + (1.0 - c_axis) * (K @ K)
+        return R, inlier_frac, tilt
+    except Exception:
+        return None
+
+
+def compute_perframe_leveling(
+    pcd_world, camera_poses, T_cam2base, min_inlier_frac=0.10, max_pts=60000
+):
+    """Method A — per-frame ego ground leveling with robust fallback.
+
+    Per frame, RANSAC the ground in its base frame and build ``R_level`` (ground normal
+    -> +Z), applied on top of ``T_cam2base``'s rotation. Unreliable frames are filled by
+    SLERP between the nearest reliable frames (ends clamped) to stay temporally smooth.
+    Estimation uses a random subsample of the world cloud (orientation is density- and
+    scale-robust); the OCC loop still voxelizes the full cloud.
+
+    Returns ``(T, 3, 3)`` f64 rotations, or ``None`` if no frame has a reliable ground.
+    """
+    pw = np.asarray(pcd_world, dtype=np.float64)
+    if pw.shape[0] == 0:
+        return None
+    if pw.shape[0] > max_pts:
+        sel = np.random.default_rng(0).choice(pw.shape[0], max_pts, replace=False)
+        pw = pw[sel]
+
+    cps = np.asarray(camera_poses, dtype=np.float64)
+    cam_centers_world = cps[:, :3, 3]
+    Rb = np.asarray(T_cam2base, dtype=np.float64)[:3, :3]
+    n_frames = cps.shape[0]
+
+    R_level = np.repeat(np.eye(3)[None], n_frames, axis=0)
+    good = np.zeros(n_frames, dtype=bool)
+    tilts = []
+    for i in range(n_frames):
+        p_cam = convert_pointcloud_world_to_camera(pw, cps[i])
+        p_base = np.asarray(p_cam, dtype=np.float64) @ Rb.T
+        cc_cam = convert_pointcloud_world_to_camera(cam_centers_world, cps[i])
+        cc_base = np.asarray(cc_cam, dtype=np.float64) @ Rb.T
+        res = ground_R_to_z(p_base, cc_base, min_inlier_frac=min_inlier_frac)
+        if res is not None:
+            R_level[i], _frac, _tilt = res
+            good[i] = True
+            tilts.append(_tilt)
+
+    n_good = int(good.sum())
+    if n_good == 0:
+        print(
+            "[level] per-frame leveling: no frame had a reliable ground plane; "
+            "keeping the frame-0 fold only."
+        )
+        return None
+
+    ks = np.where(good)[0]
+    if ks.size == 1:
+        R_level[:] = R_level[ks[0]]  # single keyframe -> constant rotation
+    else:
+        slerp = Slerp(ks, Rotation.from_matrix(R_level[ks]))
+        q = np.clip(np.arange(n_frames), ks[0], ks[-1])
+        R_level = slerp(q).as_matrix()
+    print(
+        f"[level] per-frame leveling (Method A): {n_good}/{n_frames} frames had a "
+        f"reliable ground (mean pre-level tilt {np.mean(tilts):.2f} deg); "
+        f"{n_frames - n_good} filled by SLERP/clamp."
+    )
+    return R_level
+
+
+def gravity_R_to_z(pcd, cam_centers):
+    """Estimate the ground plane by RANSAC and return the Rodrigues rotation mapping its
+    normal to +Z, plus the pre-correction tilt (deg). The normal sign is disambiguated by
+    "camera above ground". Shared by ``gravity_align_to_z`` (world frame) and
+    ``InternNavDataGenerator._fold_gravity_into_tcam2base`` (base frame).
+
+    Args:
+        pcd : (N, 3) point cloud.
+        cam_centers : (T, 3) camera centers, used to disambiguate the normal sign.
+
+    Returns:
+        (R_grav (3, 3) f64, tilt_before_deg)
+    """
+    pcd64 = np.asarray(pcd, dtype=np.float64)
+    if pcd64.shape[0] < 100:
+        raise ValueError(f"[gravity] too few points for ground RANSAC: {pcd64.shape[0]}")
+
+    o3d_pcd = o3d.geometry.PointCloud()
+    o3d_pcd.points = o3d.utility.Vector3dVector(pcd64)
+    plane, inliers = o3d_pcd.segment_plane(
+        distance_threshold=0.05, ransac_n=3, num_iterations=300
+    )
+    # Disambiguate the normal sign by "camera above ground": n[2]>0 is unreliable because
+    # +Z is the (near-horizontal) camera forward in the Pi3X/OpenCV frame-0 system.
+    a, b, c, d = plane
+    n_ground = np.array([a, b, c])
+    cc = np.asarray(cam_centers, dtype=np.float64).reshape(-1, 3)
+    mean_signed = np.mean(cc @ n_ground + d)  # mean signed camera-to-plane distance
+    if mean_signed < 0:
+        n_ground = -n_ground
+    n_ground /= max(np.linalg.norm(n_ground), 1e-12)
+    tilt_before = float(np.degrees(np.arccos(np.clip(n_ground[2], -1.0, 1.0))))
+    inlier_frac = len(inliers) / max(pcd64.shape[0], 1)
+    print(
+        f"[gravity] ground plane normal={n_ground.tolist()} "
+        f"inlier_frac={inlier_frac:.3f} tilt vs +Z = {tilt_before:.2f} deg"
+    )
+    if inlier_frac < 0.05:
+        raise ValueError(
+            f"[gravity] ground RANSAC inlier_frac too low ({inlier_frac:.3f}); "
+            f"cannot estimate gravity reliably"
+        )
+
+    target = np.array([0.0, 0.0, 1.0])
+    axis = np.cross(n_ground, target)
+    s_axis = float(np.linalg.norm(axis))
+    c_axis = float(np.dot(n_ground, target))
+    if s_axis <= 1e-6:
+        return np.eye(3), tilt_before  # already aligned with +Z
+    k_unit = axis / s_axis
+    K_skew = np.array(
+        [[0.0, -k_unit[2], k_unit[1]],
+         [k_unit[2], 0.0, -k_unit[0]],
+         [-k_unit[1], k_unit[0], 0.0]],
+    )
+    R_grav = np.eye(3) + s_axis * K_skew + (1.0 - c_axis) * (K_skew @ K_skew)
+    return R_grav, tilt_before
+
+
+def gravity_align_to_z(pcd, camera_pose, pivot):
+    """Estimate gravity via ground RANSAC and rotate the point cloud and camera poses
+    about ``pivot`` so the ground normal maps to +Z.
+
+    NOTE: not used by the data-processing pipeline; kept for verification only
+    (called by ``align_reconstruction_to_world``).
+
+    Args:
+        pcd : (N, 3) point cloud (rotated).
+        camera_pose : (T, 4, 4) camera poses (rotated).
+        pivot : (3,) rotation center (usually the frame-0 camera position).
+
+    Returns:
+        (pcd_rot (N, 3) f32, camera_pose_rot (T, 4, 4) f32, tilt_before_deg,
+         tilt_after_deg, ground_z) — ground_z is the world-frame z level of the
+         ground after rotation.
+    """
+    pcd64 = np.asarray(pcd, dtype=np.float64)
+    cam_centers = np.asarray(camera_pose, dtype=np.float64)[:, :3, 3]
+    R_grav, tilt_before = gravity_R_to_z(pcd64, cam_centers)
+    pivot = np.asarray(pivot, dtype=np.float64).reshape(3)
+
+    cp = np.asarray(camera_pose, dtype=np.float64).copy()
+    pcd_rot = (R_grav @ (pcd64 - pivot).T).T + pivot
+    cp[:, :3, 3] = (R_grav @ (cp[:, :3, 3] - pivot).T).T + pivot
+    cp[:, :3, :3] = np.einsum("ij,tjk->tik", R_grav, cp[:, :3, :3])
+
+    # Re-fit the ground after rotation to verify tilt and read the ground z level
+    # (constant across the now-horizontal plane).
+    o3d_pcd2 = o3d.geometry.PointCloud()
+    o3d_pcd2.points = o3d.utility.Vector3dVector(pcd_rot)
+    plane2, _ = o3d_pcd2.segment_plane(
+        distance_threshold=0.05, ransac_n=3, num_iterations=300
+    )
+    c2 = float(plane2[2])
+    if abs(c2) < 1e-6:
+        raise ValueError(
+            f"[gravity] post-correction ground plane not horizontal (c2={c2:.3e}); "
+            f"gravity alignment failed"
+        )
+    ground_z = float(-float(plane2[3]) / c2)  # z level of plane ax+by+cz+d=0 when horizontal
+    n2 = np.asarray(plane2[:3], dtype=np.float64)
+    n2 /= max(np.linalg.norm(n2), 1e-12)
+    if n2[2] < 0:
+        n2 = -n2
+    tilt_after = float(np.degrees(np.arccos(np.clip(n2[2], -1.0, 1.0))))
+    print(
+        f"[gravity] post-correction ground tilt vs +Z = {tilt_after:.2f} deg, "
+        f"ground_z = {ground_z:.3f}"
+    )
+    return (
+        pcd_rot.astype(np.float32),
+        cp.astype(np.float32),
+        tilt_before,
+        tilt_after,
+        ground_z,
+    )
+
+
+def align_reconstruction_to_world(pcd, camera_pose, metric_scale_correction):
+    """GT-free alignment of a Pi3X reconstruction to the real-world frame (z up,
+    frame-0 canonical origin/orientation). Pure transform extracted from
+    ``InternNavDataGenerator.align_to_world`` (instance I/O stays in the method).
+
+    NOTE: not used by the data-processing pipeline; kept for verification only.
+
+      - Scale: trust the Pi3X metric_head (experimentally validated), with the optional
+        config correction factor ``metric_scale_correction`` (default 1.0).
+      - Gravity (roll/pitch): ground RANSAC normal -> +Z (``gravity_align_to_z``). The
+        Pi3X world frame is anchored at the frame-0 camera (OpenCV), so the ground normal
+        alone recovers global gravity without GT.
+      - Origin/yaw: frame-0 canonical — origin is the ground point under the frame-0
+        camera (x,y = frame-0 camera, z = ground level), giving ground z=0, the camera at
+        positive height (~0.6), and a mostly-positive point cloud ("body on the ground");
+        a +Z rotation maps the frame-0 forward to +X. OCC is ego-frame and invariant to
+        global yaw/translation, so this step only fixes global visualization and the
+        saved poses.
+
+    Args:
+        pcd : (N, 3) reconstructed point cloud (world frame).
+        camera_pose : (T, 4, 4) camera poses (world frame). Not mutated.
+        metric_scale_correction : optional scale factor (default 1.0 trusts metric_head).
+
+    Returns:
+        (pcd_aligned (N, 3) f32, camera_pose_aligned (T, 4, 4) f32, scale)
+    """
+    pcd_np = np.asarray(pcd, dtype=np.float64)
+    cp = np.asarray(camera_pose, dtype=np.float64).copy()
+
+    # 1) Scale (optional config correction factor; default 1.0 = trust metric_head)
+    s = float(metric_scale_correction)
+    if not np.isfinite(s) or s <= 0:
+        raise ValueError(f"[align_to_world] invalid metric_scale_correction: {s}")
+    pcd_np = pcd_np * s
+    cp[:, :3, 3] = cp[:, :3, 3] * s
+
+    # 2) Gravity alignment (about frame 0)
+    pivot = cp[0, :3, 3].copy()
+    pcd_g, cp_g, tilt_b, tilt_a, ground_z = gravity_align_to_z(pcd_np, cp, pivot)
+    pcd_np = np.asarray(pcd_g, dtype=np.float64)
+    cp = np.asarray(cp_g, dtype=np.float64)
+
+    # 3) Yaw canonicalization: project frame-0 forward (OpenCV z axis in world) onto XY, rotate to +X
+    pivot = cp[0, :3, 3].copy()
+    fwd = cp[0, :3, 2].copy()
+    fwd[2] = 0.0
+    fwd_norm = float(np.linalg.norm(fwd))
+    if fwd_norm > 1e-6:
+        fwd /= fwd_norm
+        yaw = float(np.arctan2(fwd[1], fwd[0]))
+        c, sN = np.cos(-yaw), np.sin(-yaw)
+        Rz = np.array(
+            [[c, -sN, 0.0], [sN, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+        )
+        pcd_np = (Rz @ (pcd_np - pivot).T).T + pivot
+        cp[:, :3, 3] = (Rz @ (cp[:, :3, 3] - pivot).T).T + pivot
+        cp[:, :3, :3] = np.einsum("ij,tjk->tik", Rz, cp[:, :3, :3])
+
+    # 4) Origin: x,y from frame-0 camera, z from ground level -> ground z=0, camera at +height, mostly-positive pcd
+    origin = np.array([cp[0, 0, 3], cp[0, 1, 3], ground_z], dtype=np.float64)
+    pcd_np = pcd_np - origin
+    cp[:, :3, 3] = cp[:, :3, 3] - origin
+
+    pcd_aligned = pcd_np.astype(np.float32)
+    cp_aligned = cp.astype(np.float32)
+    cam0_h = float(cp[0, 2, 3])
+    print(
+        f"[align_to_world] GT-free: scale={s:.4f}, ground tilt "
+        f"{tilt_b:.2f}->{tilt_a:.2f} deg, origin->frame-0 foot on ground "
+        f"(ground z=0, cam0 height={cam0_h:.3f} m), yaw canonicalized."
+    )
+    return pcd_aligned, cp_aligned, s
+
+
 def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
     """
     Loads depths from a directory or video, resizes them to a uniform size,
@@ -788,10 +1109,7 @@ def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
         )
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
-            try:
-                sources.append(Image.open(img_path))
-            except Exception as e:
-                print(f"Could not load depth {filenames[i]}: {e}")
+            sources.append(Image.open(img_path))
     else:
         raise ValueError(f"Unsupported path. Must be a directory: {path}")
 
@@ -823,14 +1141,11 @@ def load_depths_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000):
     to_tensor_transform = transforms.ToTensor()
 
     for img_pil in sources:
-        try:
-            # Resize to the uniform target size
-            resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
-            # Convert to tensor
-            img_tensor = to_tensor_transform(resized_img)
-            tensor_list.append(img_tensor)
-        except Exception as e:
-            print(f"Error processing an image: {e}")
+        # Resize to the uniform target size
+        resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+        # Convert to tensor
+        img_tensor = to_tensor_transform(resized_img)
+        tensor_list.append(img_tensor)
 
     if not tensor_list:
         print("No images were successfully processed.")
@@ -870,10 +1185,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         all_frames = len(filenames)
         for i in range(0, len(filenames), interval):
             img_path = osp.join(path, filenames[i])
-            try:
-                sources.append(Image.open(img_path).convert("RGB"))
-            except Exception as e:
-                print(f"Could not load image {filenames[i]}: {e}")
+            sources.append(Image.open(img_path).convert("RGB"))
     elif path.lower().endswith(".mp4"):
         print(f"Loading frames from video: {path}")
         cap = cv2.VideoCapture(path)
@@ -902,6 +1214,7 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
             'poses': None,            # (1, N, 4, 4)
             'depths': None,           # (1, N, H, W)
             'intrinsics': None,       # (1, N, 3, 3)
+            'K_rescaled': None,
         }
 
     print(f"Found {len(sources)} images/frames. Processing...")
@@ -928,14 +1241,11 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
     to_tensor_transform = transforms.ToTensor()
 
     for img_pil in sources:
-        try:
-            # Resize to the uniform target size
-            resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
-            # Convert to tensor
-            img_tensor = to_tensor_transform(resized_img)
-            tensor_list.append(img_tensor)
-        except Exception as e:
-            print(f"Error processing an image: {e}")
+        # Resize to the uniform target size
+        resized_img = img_pil.resize((TARGET_W, TARGET_H), Image.Resampling.LANCZOS)
+        # Convert to tensor
+        img_tensor = to_tensor_transform(resized_img)
+        tensor_list.append(img_tensor)
 
     if not tensor_list:
         print("No images were successfully processed.")
@@ -943,16 +1253,18 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
             'poses': None,
             'depths': None,
             'intrinsics': None,
+            'K_rescaled': None,
         }
 
     # --- 4. Stack the list of tensors into a single [N, C, H, W] batch tensor ---
-    images_tensor = torch.stack(tensor_list, dim=0)
+    images_tensor = torch.stack(tensor_list, dim=0).to(device)
 
     N_out = images_tensor.shape[0]  # The actual number of successfully loaded RGB frames
 
     out_poses = None
     out_depths = None
     out_intrinsics = None
+    out_K_rescaled = None  # numpy (3,3) at TARGET_W x TARGET_H resolution; metadata, not a model kwarg
 
     # Calculate resize ratios for geometry alignment.
     # (Must be calculated here because TARGET_W/H might have been adjusted by the while loop above.)
@@ -970,50 +1282,114 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
 
         camera_tensor = torch.from_numpy(intr).float()  # float32
         out_intrinsics = camera_tensor[None].repeat(N_out, 1, 1)[None].to(device)  # (1, N, 3, 3)
+        out_K_rescaled = intr  # keep numpy copy so downstream can save it as ground-truth K
 
     # --- 6. Build depth condition ---
+    # 三种合法的"公制深度源":
+    #   A. 16-bit PNG 目录 (InternData-N1: observation.images.depth/<idx>.png)
+    #   B. gray16le mp4/mkv (Unitree gray16le 编码)
+    # 其它(尤其是 8-bit yuv420p mp4)会被静默升位成假 16-bit、再除以 1000,
+    # 输出 ~12-15 量级的"非米噪声",上一版 cv2 8-bit fallback 同样错(0-255÷255 也不是米)。
+    # 因此本版**拒绝任何非 16-bit 的视频源**,把噪声从源头掐掉。
+    out_depth_source = "none"
     if condit_depth_path is not None and os.path.exists(condit_depth_path):
-        import av
-        resized_depths_list = []
         ext = condit_depth_path.lower()
-        if ext.endswith(".mkv") or ext.endswith(".mp4"):
-            # Decode as gray16le via PyAV (works for MKV and depth-encoded MP4).
-            # Values in 16-bit unsigned mm -> divide by 1000 to get meters.
+        resized_depths_list = []
+
+        # 6.0 自动切源: 当上层把 N1 的 observation.video.depth/<ep>.mp4 (8-bit) 当 condit
+        # 传进来,但同 trajectory 下其实有 observation.images.depth/ (16-bit PNG 序列),
+        # 优先切到 PNG 目录 —— 这是 N1 真公制深度的官方原件。
+        resolved_path = condit_depth_path
+        if os.path.isfile(condit_depth_path) and (ext.endswith(".mp4") or ext.endswith(".mkv")):
+            png_dir = os.path.dirname(condit_depth_path).replace(
+                "observation.video.depth", "observation.images.depth"
+            )
+            if (
+                png_dir != os.path.dirname(condit_depth_path)
+                and os.path.isdir(png_dir)
+                and any(f.lower().endswith(".png") for f in os.listdir(png_dir))
+            ):
+                print(f"[depth] auto-switch from mp4 to 16-bit PNG dir: {png_dir}")
+                resolved_path = png_dir
+
+        if os.path.isdir(resolved_path):
+            # 6A. PNG 序列 (InternData-N1 真公制 16-bit 编码)
+            #
+            # 编码约定 (实测推导, 见 README §11.3): N1 PNG 是 uint16, **0.1 mm/LSB**:
+            #   - 0  = 缺失/未填充 (Pi3X 已经把 0 当无效处理)
+            #   - 65535 = 饱和 / 远裁面 / 天空 (必须当作无效, 否则 Pi3X 把它当 6.55 m 的真深度)
+            #   - 其它 = 真深度毫米十分位 (满量程 65535 -> 6.5535 m, 典型室内远裁面)
+            #
+            # 这与 Unitree gray16le mp4 (1 mm/LSB) 不是同一个约定; 不能混用除数。
+            png_files = [f for f in os.listdir(resolved_path) if f.lower().endswith(".png")]
+            # 数字 stem 排序: 兼容 0.png/100.png 这种非零填充的 N1 命名
+            def _stem_key(name):
+                stem = os.path.splitext(name)[0]
+                return int(stem) if stem.isdigit() else stem
+            png_files = sorted(png_files, key=_stem_key)
+            median_check_sample = None
+            for i in range(0, len(png_files), interval):
+                d_map = cv2.imread(
+                    os.path.join(resolved_path, png_files[i]), cv2.IMREAD_UNCHANGED
+                )
+                if d_map is None:
+                    continue
+                # 远裁面/天空 sentinel 65535 -> 0 (Pi3X 视为无效, 不参与 conditioning)
+                d_map = d_map.copy()
+                d_map[d_map == 65535] = 0
+                d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                d_resized = d_resized.astype(np.float32) / 10000.0  # 0.1 mm -> m
+                d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
+                resized_depths_list.append(torch.from_numpy(d_resized))
+                # 取第一帧做合理性检查
+                if median_check_sample is None:
+                    pos = d_resized[d_resized > 0]
+                    if pos.size > 0:
+                        median_check_sample = float(np.median(pos))
+            # 合理性警示: 若 ÷10000 后的中位深度仍 > 8 m, 多半接到了非 N1 编码的 PNG 集
+            if median_check_sample is not None and median_check_sample > 8.0:
+                print(f"[Warning] PNG depth median {median_check_sample:.2f} m > 8 m. "
+                      f"N1 约定 0.1 mm/LSB 通常给出 0.5-3 m 中位。该数据集可能用了不同约定, "
+                      f"核对编码后再用 model_dc 结果。")
+            out_depth_source = "png_dir"
+        elif ext.endswith(".mkv") or ext.endswith(".mp4"):
+            # 6B. mp4/mkv: 先验证是 16-bit pix_fmt 再走 gray16le; 8-bit 直接拒
+            import av
             try:
-                container = av.open(str(condit_depth_path))
-                video_stream = container.streams.video[0]
-                for av_frame in islice(container.decode(video_stream), 0, None, interval):
-                    d_map = av_frame.to_ndarray(format='gray16le')
-                    d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
-                    d_resized = d_resized.astype(np.float32) / 1000.0  # mm -> m
-                    d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
-                    resized_depths_list.append(torch.from_numpy(d_resized))
-                container.close()
+                container = av.open(str(resolved_path))
             except Exception as e:
-                # Fallback: cv2 8-bit read -- depth will be relative [0,1], not metric.
-                # This happens when the depth video uses a standard 8-bit codec.
-                print(f"[Warning] gray16le decode failed ({e}). "
-                      "Falling back to cv2 8-bit reading -- depth will NOT be metric (relative [0,1]).")
-                resized_depths_list = []
-                cap = cv2.VideoCapture(condit_depth_path)
-                if not cap.isOpened():
-                    raise IOError(f"Cannot open depth video: {condit_depth_path}")
-                frame_idx = 0
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    if frame_idx % interval == 0:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        d_resized = cv2.resize(gray, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
-                        d_resized = d_resized.astype(np.float32) / 255.0
+                print(f"[Warning] failed to open depth video {resolved_path}: {e}. "
+                      "Skipping depth conditioning.")
+                container = None
+            if container is not None:
+                video_stream = container.streams.video[0]
+                pix_fmt = (video_stream.codec_context.pix_fmt or "").lower()
+                # gray16le, yuv420p10le, gbrp16le 等都含 "16"; 8-bit yuv420p / yuvj420p / gray 不含
+                is_16bit = ("16" in pix_fmt) or ("gray16" in pix_fmt)
+                if not is_16bit:
+                    print(
+                        f"[Warning] depth video pix_fmt={pix_fmt!r} is not 16-bit. "
+                        f"PyAV gray16le decode would left-shift 8-bit luma into fake 16-bit -> "
+                        f"non-metric noise. Skipping depth conditioning. "
+                        f"For metric depth, switch to a 16-bit PNG sequence under "
+                        f"observation.images.depth/ alongside the mp4."
+                    )
+                    container.close()
+                    out_depth_source = "none_skipped_8bit_mp4"
+                else:
+                    # 现有 gray16le 路径 (Unitree), 逐字节保留
+                    for av_frame in islice(container.decode(video_stream), 0, None, interval):
+                        d_map = av_frame.to_ndarray(format='gray16le')
+                        d_resized = cv2.resize(d_map, (TARGET_W, TARGET_H), interpolation=cv2.INTER_NEAREST)
+                        d_resized = d_resized.astype(np.float32) / 1000.0  # mm -> m
                         d_resized[~np.logical_and(d_resized > 0, np.isfinite(d_resized))] = 0
                         resized_depths_list.append(torch.from_numpy(d_resized))
-                    frame_idx += 1
-                cap.release()
+                    container.close()
+                    out_depth_source = "mp4_gray16le"
         else:
-            print(f"[Warning] Unsupported depth file extension: {condit_depth_path}. "
-                  "Expected .mkv or .mp4. Skipping depth conditioning.")
+            print(f"[Warning] Unsupported depth path: {condit_depth_path}. "
+                  "Expected a .mkv/.mp4 file or a directory of 16-bit PNGs. "
+                  "Skipping depth conditioning.")
 
         n_depth = len(resized_depths_list)
         if n_depth > 0:
@@ -1036,4 +1412,11 @@ def load_images_as_tensor(path="data/truck", interval=1, PIXEL_LIMIT=255000,
         'poses': out_poses,            # (1, N, 4, 4)
         'depths': out_depths,          # (1, N, H, W)
         'intrinsics': out_intrinsics,  # (1, N, 3, 3)
+        # Metadata — NOT a Pi3X kwarg. Callers that do ``model(**conditions)`` must pop this first.
+        # Set only when an external real intrinsic was provided; downstream uses it as the
+        # authoritative K (at resized resolution) instead of the model's back-calculated estimate.
+        'K_rescaled': out_K_rescaled,  # numpy (3, 3) or None
+        # Metadata: 实际投喂给 Pi3X 的深度源, 用于 metrics.json 事后对账。
+        # 取值: 'png_dir' / 'mp4_gray16le' / 'none' / 'none_skipped_8bit_mp4'
+        'depth_source': out_depth_source,
     }
